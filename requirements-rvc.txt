@@ -1,0 +1,29 @@
+# RVC inference dependencies (verified working on Python 3.12, CPU-only).
+# Install AFTER requirements.txt:
+#   pip install -r requirements-rvc.txt
+#
+# torch must come from the CPU wheel index.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.4.1+cpu
+torchaudio==2.4.1+cpu
+
+# Core inference deps (subset of rvc_infer/requirments_cpu_py312.txt kept
+# minimal for CLI-only usage; versions are the tested working set).
+av>=15.1.0,<16
+coloredlogs>=15.0,<16
+einops>=0.8.0,<1
+faiss-cpu>=1.13.0,<2
+hyper-connections>=0.1.8,<0.4.3
+librosa>=0.10.2,<2
+local-attention>=1.11.0,<2
+numpy>=2.0
+onnxruntime>=1.24.4,<2
+opencv-python-headless>=4.10.0,<5
+praat-parselmouth>=0.4.5,<1
+scikit-learn>=1.6.0,<2
+scipy>=1.13.1,<2
+soundfile>=0.13.0,<1
+torchfcpe>=0.0.4,<0.1
+tqdm>=4.67.0,<5
+transformers>=4.49.0,<4.50

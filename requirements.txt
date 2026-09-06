@@ -1,0 +1,8 @@
+discord.py[voice]>=2.3.2
+davey>=0.1.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+piper-tts>=1.2.0
+numpy>=1.24.0
+soundfile>=0.12.1
+pytest>=7.4.0

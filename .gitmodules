@@ -1,0 +1,3 @@
+[submodule "rvc_infer"]
+	path = rvc_infer
+	url = https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git

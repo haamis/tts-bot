@@ -1,0 +1,21 @@
+default_tts: en_US-lessac-medium
+max_chars: 500
+ffmpeg_path: ffmpeg
+rvc_root: rvc_infer
+voices:
+  snake:
+    tts: en_US-lessac-medium
+    rvc_model: /home/haama/RVC/SSNAKE/SSNAKE.pth
+    rvc_index: /home/haama/RVC/IVF967_Flat_SSNAKE/added_IVF967_Flat_nprobe_1_SSNAKE_v2.index
+    pitch: 0
+    index_rate: 0.75
+    f0_method: rmvpe
+    speaker_id: 0
+  trump:
+    tts: en_US-ryan-medium
+    rvc_model: /home/haama/RVC/trump/trump.pth
+    rvc_index: /home/haama/RVC/IVF1170_Flat_trump/added_IVF1170_Flat_nprobe_1_trump_v2.index
+    pitch: 0
+    index_rate: 0.75
+    f0_method: rmvpe
+    speaker_id: 0
