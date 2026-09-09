@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from ttsbot.parser import parse_dialogue, ParseError, Turn
 from ttsbot.config import Config, VoiceConfig
 
@@ -63,22 +64,43 @@ def test_parse_voice_with_underscore_and_numbers():
     assert turns[1].voice == "voice-2"
 
 
+def test_parse_repeated_voice():
+    known = {"mario"}
+    turns = parse_dialogue("%mario one %mario two", known, 500)
+    assert len(turns) == 2
+    assert turns[0].text == "one"
+    assert turns[1].text == "two"
+
+
+def test_parse_percent_in_text_is_not_a_tag():
+    known = {"mario"}
+    turns = parse_dialogue("%mario 100% sure", known, 500)
+    assert turns[0].text == "100% sure"
+
+
+def test_parse_leading_untagged_text_raises():
+    known = {"mario"}
+    with pytest.raises(ParseError, match="no voice"):
+        parse_dialogue("untagged text %mario hello", known, 500)
+
+
 def test_config_load():
     config = Config.load("config/voices.yaml")
-    assert config.default_tts == "en_US-lessac-medium"
-    assert config.max_chars == 500
+    assert config.max_chars > 0
+    # snake/trump are the documented dry-run voices
     assert "snake" in config.voices
     assert "trump" in config.voices
 
-    snake = config.voices["snake"]
-    assert snake.tts == "en_US-lessac-medium"
-    assert snake.rvc_model == "/home/haama/RVC/SSNAKE/SSNAKE.pth"
-    assert "IVF967_Flat_SSNAKE" in snake.rvc_index
-    assert snake.pitch == 0
-    assert snake.index_rate == 0.75
-    assert snake.f0_method == "rmvpe"
-
-    trump = config.voices["trump"]
-    assert trump.tts == "en_US-ryan-medium"
-    assert trump.rvc_model == "/home/haama/RVC/trump/trump.pth"
-    assert "IVF1170_Flat_trump" in trump.rvc_index
+    for name, voice in config.voices.items():
+        # every voice must point at real assets — catches path drift
+        model = Path(voice.rvc_model)
+        assert model.is_file(), f"{name}: rvc_model not found: {model}"
+        if voice.rvc_index:
+            index = Path(voice.rvc_index)
+            assert index.is_file(), f"{name}: rvc_index not found: {index}"
+        assert voice.tts, f"{name}: missing piper voice"
+        assert voice.f0_method in ("pm", "rmvpe")
+        assert isinstance(voice.speaker_id, int) and voice.speaker_id >= 0
+        assert 0 <= voice.index_rate <= 1
+        assert voice.speed_cloud > 0
+        assert voice.speed_local > 0

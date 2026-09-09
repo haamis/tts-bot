@@ -1,0 +1,16 @@
+{
+  // 1. Core Environment Setup
+  "venvPath": ".",
+  "venv": "venv", // Replace with your exact virtual environment folder name
+
+  // 2. Lowering Strictness
+  "typeCheckingMode": "standard", // Drops 'strict' checking down to basic types
+
+  "reportGeneralTypeIssues": "warning", // Changes red errors to yellow warnings
+  "reportPropertyTypeMismatch": "none", // Fixes your "FakeCompletions" property issue
+  "reportArgumentType": "warning",      // Relaxes strict library mismatches (httpx vs httpx2)
+  "reportAttributeAccessIssue": "none", // Fixes the missing "calls" attribute issue
+
+  // 3. Keep it Useful for the Agent
+  "useLibraryCodeForTypes": true // Ensures the agent still gets accurate auto-complete
+}

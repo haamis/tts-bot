@@ -1,7 +1,21 @@
 import asyncio
+import json
+import logging
 import os
-import tempfile
+import sys
 from pathlib import Path
+
+log = logging.getLogger("ttsbot.rvc")
+
+WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
+
+
+class RVCRequestError(Exception):
+    """Deterministic per-request failure (worker is healthy; retry won't help)."""
+
+
+class WorkerCrashed(Exception):
+    """Worker process crash, protocol desync, or timeout."""
 
 
 class RvcRunner:
@@ -11,11 +25,17 @@ class RvcRunner:
         rvc_root: str,
         device: str = "cpu",
         is_half: bool = True,
+        use_worker: bool = True,
     ):
         self.infer_script = Path(infer_script)
-        self.rvc_root = Path(rvc_root)
+        self.rvc_root = Path(rvc_root).resolve()
         self.device = device
         self.is_half = is_half
+        self.use_worker = use_worker
+        self._worker: asyncio.subprocess.Process | None = None
+        self._worker_lock = asyncio.Lock()
+        self._worker_disabled = False
+        self._req_id = 0
 
     async def convert(
         self,
@@ -36,18 +56,141 @@ class RvcRunner:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
+        self._check_paths(model_path, index_path)
+
+        if self.use_worker and not self._worker_disabled:
+            try:
+                return await self._convert_worker(
+                    input_path, output_path, model_path, index_path,
+                    pitch, index_rate, f0_method, resample_sr,
+                    rms_mix_rate, protect, speaker_id,
+                )
+            except RVCRequestError:
+                # Deterministic failure — a subprocess would fail identically.
+                raise
+            except Exception as e:
+                log.warning("Worker conversion failed, falling back to subprocess: %s", e)
+
+        return await self._convert_subprocess(
+            input_path, output_path, model_path, index_path,
+            pitch, index_rate, f0_method, resample_sr,
+            rms_mix_rate, protect, speaker_id,
+        )
+
+    def _check_paths(self, model_path: str, index_path: str | None) -> None:
         if not (self.rvc_root / self.infer_script).exists():
             raise RuntimeError(f"RVC infer script not found: {self.rvc_root / self.infer_script}")
-
         if not Path(model_path).exists():
             raise RuntimeError(f"RVC model not found: {model_path}")
-
         if index_path and not Path(index_path).exists():
             raise RuntimeError(f"RVC index not found: {index_path}")
 
-        # Build command
+    # ---- persistent worker mode ----
+
+    async def _ensure_worker(self) -> asyncio.subprocess.Process:
+        if self._worker is not None and self._worker.returncode is None:
+            return self._worker
+
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(self.rvc_root) + (os.pathsep + existing if existing else "")
+        env["RVC_WORKER_ROOT"] = str(self.rvc_root)
+        # glibc defaults to 8*ncores malloc arenas and rarely returns freed
+        # heap; both inflate long-lived worker RSS by gigabytes.
+        env.setdefault("MALLOC_ARENA_MAX", "2")
+        env.setdefault("MALLOC_TRIM_THRESHOLD_", str(128 * 1024 * 1024))
+        env["RVC_WORKER_MAX_RSS_MB"] = os.environ.get("RVC_WORKER_MAX_RSS_MB", "2500")
+
+        self._worker = await asyncio.create_subprocess_exec(
+            sys.executable, "-u", str(WORKER_SCRIPT),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=str(self.rvc_root),
+        )
+        line = await asyncio.wait_for(self._worker.stdout.readline(), timeout=300)
+        if not line:
+            raise RuntimeError("worker died during startup")
+        resp = json.loads(line)
+        if resp.get("event") != "ready":
+            raise RuntimeError(f"unexpected worker handshake: {resp}")
+        log.info("RVC worker ready (device=%s threads=%s)", resp.get("device"), resp.get("threads"))
+        return self._worker
+
+    async def _kill_worker(self) -> None:
+        if self._worker is None:
+            return
+        try:
+            self._worker.kill()
+        except ProcessLookupError:
+            pass
+        self._worker = None
+
+    async def _convert_worker(
+        self, input_path, output_path, model_path, index_path,
+        pitch, index_rate, f0_method, resample_sr, rms_mix_rate, protect, speaker_id,
+    ) -> str:
+        # One in-flight request at a time keeps the protocol simple; inference
+        # is CPU-bound anyway, so parallelism wouldn't help.
+        async with self._worker_lock:
+            self._req_id += 1
+            req = {
+                "id": self._req_id,
+                "cmd": "convert",
+                "input": str(input_path),
+                "output": str(output_path),
+                "model": str(model_path),
+                "index": index_path or "",
+                "pitch": int(pitch),
+                "index_rate": float(index_rate),
+                "f0_method": f0_method,
+                "resample_sr": int(resample_sr),
+                "rms_mix_rate": float(rms_mix_rate),
+                "protect": float(protect),
+                "speaker_id": int(speaker_id),
+            }
+
+            for attempt in (1, 2):
+                try:
+                    proc = await self._ensure_worker()
+                    proc.stdin.write((json.dumps(req) + "\n").encode())
+                    await proc.stdin.drain()
+
+                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=1800)
+                    if not line:
+                        raise WorkerCrashed("worker died")
+                    resp = json.loads(line)
+                    if resp.get("id") != req["id"]:
+                        raise WorkerCrashed(f"protocol desync: {resp}")
+                    if not resp.get("ok"):
+                        # Deterministic per-request failure (bad input/model):
+                        # the worker is healthy, so fail fast without killing
+                        # it or retrying a doomed request.
+                        raise RVCRequestError(f"RVC worker error: {resp.get('error')}")
+                    if not output_path.exists():
+                        raise RVCRequestError(f"RVC produced no output at {output_path}")
+                    return str(output_path)
+                except WorkerCrashed as e:
+                    await self._kill_worker()
+                    if attempt == 2:
+                        raise RuntimeError(f"RVC worker crashed: {e}") from e
+                    log.warning("RVC worker crashed; respawning and retrying once")
+                except asyncio.TimeoutError as e:
+                    await self._kill_worker()
+                    if attempt == 2:
+                        raise RuntimeError("RVC worker timed out") from e
+                    log.warning("RVC worker timed out; respawning and retrying once")
+
+        raise RuntimeError("unreachable")
+
+    # ---- subprocess mode (fallback) ----
+
+    async def _convert_subprocess(
+        self, input_path, output_path, model_path, index_path,
+        pitch, index_rate, f0_method, resample_sr, rms_mix_rate, protect, speaker_id,
+    ) -> str:
         cmd = [
-            "python",
+            sys.executable,
             str(self.infer_script),
             "--model",
             str(model_path),
@@ -74,7 +217,13 @@ class RvcRunner:
             cmd.extend(["--resample-sr", str(resample_sr)])
 
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.rvc_root) + ":" + env.get("PYTHONPATH", "")
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(self.rvc_root) + (os.pathsep + existing if existing else "")
+        # The vendored CLI loads checkpoints with legacy torch.load; silence
+        # the FutureWarning without touching the submodule.
+        env["PYTHONWARNINGS"] = "ignore::FutureWarning" + (
+            "," + env["PYTHONWARNINGS"] if env.get("PYTHONWARNINGS") else ""
+        )
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -94,3 +243,23 @@ class RvcRunner:
             raise RuntimeError(f"RVC produced no output at {output_path}")
 
         return str(output_path)
+
+    async def shutdown(self) -> None:
+        """Terminate the persistent worker, if running."""
+        if self._worker is None:
+            return
+        try:
+            if self._worker.returncode is None:
+                self._worker.stdin.write(b'{"id": 0, "cmd": "shutdown"}\n')
+                await self._worker.stdin.drain()
+                try:
+                    await asyncio.wait_for(self._worker.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    self._worker.kill()
+        except Exception:
+            try:
+                self._worker.kill()
+            except ProcessLookupError:
+                pass
+        finally:
+            self._worker = None

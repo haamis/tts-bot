@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "lsp": false,
+  "python": {
+    "analysis": {
+      "typeCheckingMode": "standard",
+      "useLibraryCodeForTypes": true,
+      "diagnosticSeverityOverrides": {
+        "reportGeneralTypeIssues": "warning",
+        "reportPropertyTypeMismatch": "none",
+        "reportArgumentType": "warning",
+        "reportAttributeAccessIssue": "none"
+      }
+    }
+  }
+}

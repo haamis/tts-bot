@@ -53,3 +53,6 @@ piper_voices/
 
 # RVC models and indexes (referenced via config, not committed)
 models/
+
+# RVC voice models (large binaries; referenced via config, not committed)
+rvc_models/

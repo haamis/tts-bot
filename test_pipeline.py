@@ -12,7 +12,7 @@ import numpy as np
 from ttsbot.config import Config
 from ttsbot.parser import parse_dialogue
 from ttsbot.pipeline import Pipeline
-from ttsbot.tts.piper_runner import PiperRunner
+from ttsbot.tts.manager import build_tts_manager
 from ttsbot.rvc.runner import RvcRunner
 
 
@@ -26,9 +26,10 @@ def analyze(path: str) -> dict:
 
 async def main():
     config = Config.load("config/voices.yaml")
+    env = {"OPENROUTER_API_KEY": "", "TTS_PROVIDER": "local"}
 
     pipeline = Pipeline(
-        piper=PiperRunner(),
+        tts=build_tts_manager(env, ffmpeg_path=config.ffmpeg_path),
         rvc=RvcRunner(
             infer_script="infer/cli.py",
             rvc_root=config.rvc_root,
@@ -41,19 +42,20 @@ async def main():
     turns = parse_dialogue(text, set(config.voices.keys()), config.max_chars)
     print(f"Turns: {[t.voice for t in turns]}")
 
-    files = await pipeline.process_turns(
-        turns=turns, voices=config.voices, guild_id=0, channel_id=0, dry_run=True,
+    results = await pipeline.process_turns(
+        turns=turns, voices=config.voices, dry_run=True,
     )
 
     ok = True
-    for f in files:
-        stats = analyze(f)
-        print(f"{Path(f).name}: {stats}")
+    for r in results:
+        stats = analyze(r.path)
+        print(f"{Path(r.path).name} (provider={r.provider}, note={r.note}): {stats}")
         if stats["dur"] < 0.5 or stats["rms"] < 0.005:
             print("  -> SUSPICIOUS: too short or too quiet!")
             ok = False
 
     print("\nPASS: audio looks valid" if ok else "\nFAIL: audio is broken")
+    await pipeline.rvc.shutdown()
 
 
 if __name__ == "__main__":

@@ -28,6 +28,13 @@ def parse_dialogue(text: str, known_voices: set[str], max_chars: int = 500) -> L
     if not matches:
         raise ParseError("No voice tags found. Use %voice_name text format.")
 
+    leading = text[: matches[0].start()].strip()
+    if leading:
+        raise ParseError(
+            f"Text before the first voice tag has no voice: '{leading[:50]}'. "
+            "Start with %voice_name."
+        )
+
     turns = []
     for i, match in enumerate(matches):
         voice_name = match.group("name")
