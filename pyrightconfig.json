@@ -6,6 +6,11 @@
   // 2. Lowering Strictness
   "typeCheckingMode": "standard", // Drops 'strict' checking down to basic types
 
+  // The RVC submodule has no __init__.py by design (namespace packages) and
+  // lands on sys.path only at runtime (runner.py / worker.py / diarize.py);
+  // tell pyright where to resolve `infer.*` statically instead.
+  "extraPaths": ["rvc_infer"],
+
   "reportGeneralTypeIssues": "warning", // Changes red errors to yellow warnings
   "reportPropertyTypeMismatch": "none", // Fixes your "FakeCompletions" property issue
   "reportArgumentType": "warning",      // Relaxes strict library mismatches (httpx vs httpx2)

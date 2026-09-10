@@ -23,14 +23,10 @@ class RvcRunner:
         self,
         infer_script: str,
         rvc_root: str,
-        device: str = "cpu",
-        is_half: bool = True,
         use_worker: bool = True,
     ):
         self.infer_script = Path(infer_script)
         self.rvc_root = Path(rvc_root).resolve()
-        self.device = device
-        self.is_half = is_half
         self.use_worker = use_worker
         self._worker: asyncio.subprocess.Process | None = None
         self._worker_lock = asyncio.Lock()
@@ -39,8 +35,8 @@ class RvcRunner:
 
     async def convert(
         self,
-        input_path: str,
-        output_path: str,
+        input_path: str | Path,
+        output_path: str | Path,
         model_path: str,
         index_path: str | None,
         pitch: int = 0,

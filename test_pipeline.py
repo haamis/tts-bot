@@ -33,8 +33,6 @@ async def main():
         rvc=RvcRunner(
             infer_script="infer/cli.py",
             rvc_root=config.rvc_root,
-            device="cpu",
-            is_half=True,
         ),
     )
 

@@ -13,7 +13,7 @@ planned via riser; see README).
 
 ```bash
 source venv/bin/activate
-pytest tests/ -q                # 37 tests, NO network (providers/LLM mocked)
+pytest tests/ -q                # 175 tests, NO network (providers/LLM mocked)
 python test_pipeline.py         # e2e Piper->RVC check, ~1-2 min, asserts audio validity
 BOT_DRY_RUN=1 python -m ttsbot.bot   # full pipeline, no Discord connection
 python -m ttsbot.bot            # live bot (needs real DISCORD_TOKEN in .env)
@@ -32,6 +32,8 @@ python -m ttsbot.bot            # live bot (needs real DISCORD_TOKEN in .env)
 | `ttsbot/rvc/runner.py` | worker client + subprocess fallback; `RVCRequestError` vs `WorkerCrashed` |
 | `ttsbot/rvc/worker.py` | persistent RVC worker (JSON lines on stdin/stdout) |
 | `ttsbot/media/ytdlp_runner.py` | yt-dlp probe/download + duration cap |
+| `ttsbot/media/diarize.py` | Multi-voice `!rvc` diarization: wav2vec2 embeddings -> clustering -> pitch-ranked voice assignment; `tools/analyze_voices.py` builds `config/voice_pitch.json` |
+| `ttsbot/media/diarize_pyannote.py` | Optional pyannote engine (`RVC_DIARIZE_ENGINE`, gated models need `HF_TOKEN`); same Segment/assignment tail as local |
 | `ttsbot/llm/openrouter.py` | OpenRouter chat for `!generate` (reasoning off via `effort:none`; retries: over-cap, 429, empty, reasoning-mandatory 400, upstream 404/5xx — upstream retries exclude the failed provider via `provider.ignore`, parsed from the error body's `provider_name`) |
 | `ttsbot/audio/player.py` | playback; `_extract_url` lives in `bot.py` |
 | `config/voices.yaml` | user-tuned live — never assume its values in tests |
@@ -89,6 +91,34 @@ python -m ttsbot.bot            # live bot (needs real DISCORD_TOKEN in .env)
   found -> the argument text is used as a yt-dlp `ytsearch1:` query instead
   (`YtdlpRunner.search`); the duration cap still applies to the resolved video
   (probe check + download `match_filter`).
+- Multi-voice `!rvc` diarization: `RVC_DIARIZE_THRESHOLD` (default 0.35,
+  calibrated on real clips; 0 = force K clusters, no collapse). wav2vec2
+  weights (~360MB) download once to `~/.cache/torch` and load lazily per
+  command. f0 estimation uses RMVPE from the RVC submodule (lazy, cached);
+  pyin is only a fallback — pyin drowns under music beds (floor-pins or
+  drops 44% of windows on music-bedded clips) and octave-doubles ambiguous
+  frames, RMVPE returns 0 for unvoiced instead of guessing. Per-window f0
+  is part of the clustering distance (splits male/female pairs the
+  embeddings interleave); the additive pitch term can fragment expressive
+  speakers (intra-speaker range ~1 octave) — the >k force-merge (pinned
+  n_clusters) re-merges fragments, then majority-of-3 temporal smoothing
+  flips isolated mid-sentence blips — but only when the blip's f0 agrees
+  with the FLANKING cluster's median more than its own (genuine short
+  interjections have sibling windows elsewhere and survive; solo/untrusted
+  blips fall back to the temporal prior).
+  clustered; untrusted windows get labels by temporal adjacency (nearest
+  trusted neighbour within 3 slots, tie -> original audio, no cascading).
+  Voice mapping is RANK-matched (equal counts of measured clusters and
+  profiled voices: lowest f0 cluster -> lowest f0 voice), NOT closest-match
+  — rank preserves the relative pitch between speakers even when both sit
+  outside the voices' range; unequal counts degrade to closest-match.
+  GPU plan: GPU_UPGRADE_PLAN.md (pyannote engine already wired).
+  Negligible clusters (< max(1.5s, 2% of media)) are noise, not speakers —
+  they keep original audio instead of consuming a voice; rejection happens
+  BEFORE the force-merge so noise can't push a real speaker out. Clusters
+  ≤ K always; leftover clusters keep ORIGINAL audio.
+  `config/voice_pitch.json` is generated (gitignored); profiles are keyed
+  by model path+mtime+pitch+f0_method+estimator and go stale automatically.
 - `!generate` with one voice produces a single `Turn` directly (bypasses tag
   parsing, so a stray `%` in LLM text can't reroute voices). With several
   comma-separated voices (`_resolve_voice_spec`) the LLM is prompted for

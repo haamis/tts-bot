@@ -175,7 +175,9 @@ BOT_DRY_RUN=1
 
 ### Prefix commands
 - `!speak %voice text %voice2 more text` — Generate and play dialogue
-- `!rvc <voice> <url or search terms>` — Download a video/audio URL with yt-dlp, convert it with the given RVC voice, and play it (e.g. `!rvc snake https://youtube.com/watch?v=...` or `!rvc %snake ...`). If the argument contains no URL, it is used as a YouTube search instead (`!rvc trump rick never gonna give you up`). The status message shows the media length; media longer than the limit (default 3 minutes, `MAX_MEDIA_SECONDS` in `.env`) is rejected — searched videos included.
+- `!rvc <voice[,voice2,...]> <url or search terms>` — Download a video/audio URL with yt-dlp, convert it with the given RVC voice, and play it (e.g. `!rvc snake https://youtube.com/watch?v=...` or `!rvc %snake ...`). If the argument contains no URL, it is used as a YouTube search instead (`!rvc trump rick never gonna give you up`). The status message shows the media length; media longer than the limit (default 3 minutes, `MAX_MEDIA_SECONDS` in `.env`) is rejected — searched videos included.
+  - **Multiple voices** (`!rvc trump,snake <url>`): the media is diarized — speech is split into speaker segments via wav2vec2 embeddings + clustering — and each speaker is converted with its assigned voice. Speakers are matched to voices by pitch (higher-pitch voice ↔ higher-pitch speaker, using per-voice pitch profiles from `tools/analyze_voices.py`; unprofiled voices fall back to first-appearance order). Music/silence between segments stays original audio. The done status reports the assignment (e.g. `trump @ 156Hz, snake @ 471Hz`).
+  - Run `python tools/analyze_voices.py` once (and after adding/changing voices) to build the pitch profiles; the done status warns about unprofiled voices.
 - `!generate <voice[,voice2,...]> <prompt>` — An LLM (OpenRouter) writes spoken text from your prompt, then it's played through the normal pipeline. One voice gives a monologue (e.g. `!generate trump a rant about tiny keyboards`); comma-separated voices give a multi-voice dialogue where the LLM takes turns (e.g. `!generate trump,snake arguing which is better, burger king or mcdonalds`)
 - `!voices` — List available voices
 
@@ -319,11 +321,16 @@ TTS-bot/
 │   ├── rvc/
 │   │   └── runner.py        # RVC runner (persistent worker + subprocess fallback)
 │   ├── media/
-│   │   └── ytdlp_runner.py  # yt-dlp download wrapper for !rvc
+│   │   ├── ytdlp_runner.py    # yt-dlp download wrapper for !rvc
+│   │   ├── diarize.py         # Speaker diarization for multi-voice !rvc
+│   │   └── audio.py           # Wav load/slice/concat helpers
 │   ├── llm/
-│   │   └── openrouter.py    # OpenRouter client for !generate
+│   │   └── openrouter.py      # OpenRouter client for !generate
 │   └── audio/
-│       └── player.py        # Discord voice playback
+│       └── player.py          # Discord voice playback
+├── tools/
+│   ├── rvc_models.py          # Download voices from voice-models.com
+│   └── analyze_voices.py      # Build per-voice pitch profiles (voice_pitch.json)
 ├── tests/
 │   └── test_parser.py
 ├── test_pipeline.py         # End-to-end pipeline test

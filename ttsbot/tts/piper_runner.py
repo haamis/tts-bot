@@ -16,7 +16,7 @@ class PiperRunner:
     def __init__(self, piper_bin: str | None = None):
         self.piper_bin = piper_bin or _venv_bin("piper")
 
-    async def synthesize(self, voice: str, text: str, output_path: str, speed: float = 1.0) -> str:
+    async def synthesize(self, voice: str, text: str, output_path: str | Path, speed: float = 1.0) -> str:
         if speed <= 0:
             raise ValueError(f"speed must be positive, got {speed}")
 

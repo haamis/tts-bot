@@ -127,5 +127,30 @@ def load_env() -> dict:
         "OPENROUTER_TTS_SAMPLE_RATE": int(os.getenv("OPENROUTER_TTS_SAMPLE_RATE", "24000")),
         "CLOUD_TTS_COOLDOWN": float(os.getenv("CLOUD_TTS_COOLDOWN", "300")),
         "MAX_MEDIA_SECONDS": int(os.getenv("MAX_MEDIA_SECONDS", "180")),
+        # Multi-voice !rvc: cosine-distance cut for collapsing detected
+        # speakers (local engine). Calibrated on two real interview clips
+        # (hotones/ferns): same-speaker windows merge below ~0.30, true
+        # speaker splits land at ~0.35-0.45 — 0.35 collapses fragments while
+        # keeping speakers separate (it over-segments slightly; force-merge
+        # to K handles the rest). 0 disables collapsing (forces one cluster
+        # per requested voice; caller owns speaker-count mismatches). Also
+        # forwarded to the pyannote engine, where 0 pins num_speakers=K and
+        # >0 lets pyannote find fewer speakers.
+        "RVC_DIARIZE_THRESHOLD": float(os.getenv("RVC_DIARIZE_THRESHOLD", "0.35")),
+        # Diarization engine for multi-voice !rvc: "auto" uses pyannote when
+        # HF_TOKEN is set (falls back to local on environment failures;
+        # data errors like "no speech detected" propagate), "local" the
+        # built-in wav2vec2+RMVPE stack, "pyannote" forces pyannote (errors
+        # surface to the user). RVC_DIARIZE_THRESHOLD governs the local
+        # clustering; pyannote uses it only for the 0 = num_speakers=K pin.
+        "RVC_DIARIZE_ENGINE": os.getenv("RVC_DIARIZE_ENGINE", "auto"),
+        # HuggingFace token, needed for the gated pyannote models.
+        "HF_TOKEN": os.getenv("HF_TOKEN", ""),
+        # Torch device for the pyannote diarization engine ("auto" = cuda
+        # when available, else cpu). The local diarization engine still runs
+        # on CPU (device threading pending the GPU upgrade — see
+        # GPU_UPGRADE_PLAN.md Stage 1). The RVC worker picks its own device
+        # (rvc_infer auto-detects + fp16) and ignores this.
+        "RVC_DEVICE": os.getenv("RVC_DEVICE", "auto"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
     }

@@ -15,6 +15,7 @@ from ttsbot.pipeline import Pipeline
 from ttsbot.tts.manager import build_tts_manager
 from ttsbot.rvc.runner import RvcRunner
 from ttsbot.media.ytdlp_runner import YtdlpRunner
+from ttsbot.media import diarize
 from ttsbot.llm.openrouter import (
     OpenRouterClient,
     LlmTextTooLong,
@@ -65,8 +66,6 @@ class TTSBot(commands.Bot):
             rvc=RvcRunner(
                 infer_script="infer/cli.py",
                 rvc_root=str(rvc_root),
-                device="cpu",
-                is_half=True,
                 use_worker=env["RVC_WORKER"],
             ),
         )
@@ -173,13 +172,20 @@ class TTSBot(commands.Bot):
         parts = argstr.split(None, 1)
         if len(parts) < 2:
             await message.reply(
-                "Usage: `!rvc <voice> <url or search terms>` e.g. "
-                "`!rvc snake https://youtube.com/watch?v=...` or `!rvc trump rick never gonna give you up`"
+                "Usage: `!rvc <voice[,voice2,...]> <url or search terms>` e.g. "
+                "`!rvc snake https://youtube.com/watch?v=...`, "
+                "`!rvc trump rick never gonna give you up`, or "
+                "`!rvc trump,snake <two-speaker video>` (speakers are detected and assigned by pitch)"
             )
             return
-        voice_name, url = parts[0], parts[1].strip()
+        voices = self._resolve_voice_spec(parts[0])
+        if voices is None:
+            known = ", ".join(sorted(self.config.voices))
+            await message.reply(f"❌ Unknown voice in '{parts[0]}'. Known voices: {known}")
+            return
+        url = parts[1].strip()
         status = await message.reply("⏳ Downloading audio...")
-        await self._process_rvc(message.channel, message.author, message.guild, voice_name, url, status=status)
+        await self._process_rvc(message.channel, message.author, message.guild, voices, url, status=status)
 
     async def _handle_generate_prefix(self, message: discord.Message):
         argstr = message.content[len(self.env["COMMAND_PREFIX"]) + 9:].strip()
@@ -271,16 +277,21 @@ class TTSBot(commands.Bot):
         matches = [n for n in sorted(self.config.voices) if current in n.lower()]
         return [app_commands.Choice(name=n, value=n) for n in matches[:25]]
 
-    @app_commands.command(name="rvc", description="Download media via yt-dlp and convert it with an RVC voice")
+    @app_commands.command(name="rvc", description="Download media via yt-dlp and convert it with RVC voice(s)")
     @app_commands.describe(
-        voice="RVC voice to convert to",
+        voice="RVC voice(s); comma-separated for per-speaker conversion (e.g. trump,snake)",
         url="Video/audio URL, or search terms to find it on YouTube",
     )
     @app_commands.autocomplete(voice=_voice_autocomplete)
     async def rvc_slash(self, interaction: discord.Interaction, voice: str, url: str):
         await interaction.response.defer()
         status = await interaction.followup.send("⏳ Downloading audio...", wait=True)
-        await self._process_rvc(interaction.channel, interaction.user, interaction.guild, voice, url, status=status)
+        voices = self._resolve_voice_spec(voice)
+        if voices is None:
+            known = ", ".join(sorted(self.config.voices))
+            await status.edit(content=f"❌ Unknown voice in '{voice}'. Known voices: {known}")
+            return
+        await self._process_rvc(interaction.channel, interaction.user, interaction.guild, voices, url, status=status)
 
     @app_commands.command(name="generate", description="LLM writes a monologue or multi-voice dialogue, then plays it")
     @app_commands.describe(
@@ -303,18 +314,15 @@ class TTSBot(commands.Bot):
         channel: discord.abc.Messageable,
         author: discord.User | discord.Member,
         guild: discord.Guild | None,
-        voice_name: str,
+        voices: list[str],
         url: str,
         status: discord.Message | None = None,
     ):
         set_status = self._status_editor(status)
 
-        # Accept the voice name with or without the % tag prefix
-        voice_name = voice_name.lstrip("%")
-
         query = url.strip()
-        url = self._extract_url(url)
-        if url is None:
+        ext_url = self._extract_url(url)
+        if ext_url is None:
             # No URL in the argument -> treat the text as a search query
             if not query:
                 await set_status("❌ Nothing to search for. Usage: `!rvc <voice> <url or search terms>`")
@@ -324,13 +332,14 @@ class TTSBot(commands.Bot):
             if found is None:
                 await set_status(f"❌ No results found for '{query}'.")
                 return
-            url, title = found
+            ext_url, title = found
             await set_status(f"🔎 Found: **{title}**")
+        url = ext_url
 
-        voice_cfg = self.config.get_voice(voice_name)
-        if voice_cfg is None:
+        voice_cfgs = [self.config.get_voice(v) for v in voices]
+        if any(cfg is None for cfg in voice_cfgs):
             known = ", ".join(sorted(self.config.voices))
-            await set_status(f"❌ Unknown voice: '{voice_name}'. Known voices: {known}")
+            await set_status(f"❌ Unknown voice. Known voices: {known}")
             return
 
         if not guild:
@@ -375,24 +384,18 @@ class TTSBot(commands.Bot):
                     await set_status(f"❌ Download failed: {e}")
                     return
 
-                await set_status(f"⏳ Converting to **{voice_name}**{dur_note} (this can take a while)...")
-
                 if self.env["BOT_DRY_RUN"]:
                     await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
                     return
 
-                out_path = workdir / "converted.wav"
                 try:
-                    await self.pipeline.rvc.convert(
-                        input_path=str(source_path),
-                        output_path=str(out_path),
-                        model_path=voice_cfg.rvc_model,
-                        index_path=voice_cfg.rvc_index,
-                        pitch=voice_cfg.pitch,
-                        index_rate=voice_cfg.index_rate,
-                        f0_method=voice_cfg.f0_method,
-                        speaker_id=voice_cfg.speaker_id,
-                    )
+                    diar_result = None
+                    if len(voice_cfgs) == 1:
+                        await self._convert_single(source_path, voice_cfgs[0], workdir, dur_note, set_status)
+                    else:
+                        diar_result = await self._convert_multivoice(
+                            source_path, voice_cfgs, workdir, set_status
+                        )
                 except Exception as e:
                     log.exception("RVC conversion failed")
                     await set_status(f"❌ Conversion failed: {e}")
@@ -400,15 +403,170 @@ class TTSBot(commands.Bot):
 
                 try:
                     await self.player.connect(voice_channel)
-                    await set_status(f"🔊 Playing **{voice_name}** conversion...")
-                    await self.player.play_sequence(voice_channel, [str(out_path)])
-                    await set_status("✅ Done.")
+                    if diar_result is not None:
+                        await set_status(
+                            f"🔊 Playing {diar_result.detected}-speaker conversion..."
+                        )
+                    else:
+                        await set_status(f"🔊 Playing **{voices[0]}** conversion...")
+                    await self.player.play_sequence(voice_channel, [str(workdir / "converted.wav")])
+                    if diar_result is not None:
+                        await set_status(f"✅ Done. ({diarize.result_summary(diar_result)})")
+                    else:
+                        await set_status("✅ Done.")
                 except Exception as e:
                     log.exception("RVC playback failed")
                     await set_status(f"❌ Error: {e}")
             finally:
                 if not keep_files:
                     shutil.rmtree(workdir, ignore_errors=True)
+
+    async def _convert_single(self, source_path: str, voice_cfg, workdir, dur_note, set_status) -> None:
+        """Original single-voice path: whole media through one RVC model."""
+        await set_status(
+            f"⏳ Converting to **{voice_cfg.name}**{dur_note} (this can take a while)..."
+        )
+        await self.pipeline.rvc.convert(
+            input_path=str(source_path),
+            output_path=str(workdir / "converted.wav"),
+            model_path=voice_cfg.rvc_model,
+            index_path=voice_cfg.rvc_index,
+            pitch=voice_cfg.pitch,
+            index_rate=voice_cfg.index_rate,
+            f0_method=voice_cfg.f0_method,
+            speaker_id=voice_cfg.speaker_id,
+        )
+
+    async def _diarize(self, source_path: str, voice_names: list[str], voice_f0, set_status):
+        """Multi-voice speaker diarization via the configured engine.
+
+        RVC_DIARIZE_ENGINE: "auto" prefers pyannote when HF_TOKEN is set and
+        falls back to the local engine on environment failures (missing
+        token/import/model download); "local" and "pyannote" pin the choice
+        (pinned pyannote errors surface to the user instead of silently
+        degrading). Data errors (ValueError, e.g. "no speech detected")
+        propagate in auto mode too — the local engine would just raise the
+        same error after a wasteful wav2vec2 load.
+        """
+        from ttsbot.media import diarize_pyannote
+
+        engine = self.env["RVC_DIARIZE_ENGINE"]
+        threshold = self.env["RVC_DIARIZE_THRESHOLD"]
+        use_pyannote = engine == "pyannote" or (engine == "auto" and self.env["HF_TOKEN"])
+        if use_pyannote:
+            try:
+                result = await asyncio.to_thread(
+                    diarize_pyannote.diarize_media_pyannote,
+                    source_path,
+                    voice_names,
+                    voice_f0,
+                    threshold,
+                    self.env["HF_TOKEN"],
+                    self.env.get("RVC_DEVICE", "auto"),
+                )
+                return result
+            except ValueError:
+                # Data errors ("no speech detected", "no sustained speech")
+                # are engine-independent — don't rerun the local engine on
+                # the same doomed audio.
+                raise
+            except Exception as e:
+                if engine == "pyannote":
+                    raise
+                log.warning("pyannote diarization failed (%s); using local engine", e)
+        return await asyncio.to_thread(
+            diarize.diarize_media,
+            source_path,
+            voice_names,
+            voice_f0,
+            threshold,
+        )
+
+    async def _convert_multivoice(self, source_path: str, voices: list, workdir, set_status):
+        """Diarize media, convert each speech segment with its assigned
+        voice, keep original audio in the gaps, reassemble one file.
+        Returns the DiarizationResult for status reporting."""
+        profiles = diarize.load_profiles(PROJECT_ROOT / "config" / "voice_pitch.json")
+        voice_f0 = diarize.voice_f0_map(profiles, voices)
+        await set_status("⏳ Detecting speakers...")
+        result = await self._diarize(source_path, [c.name for c in voices], voice_f0, set_status)
+
+        notes = []
+        used = set(result.voice_of_cluster.values())
+        unused = [c.name for c in voices if c.name not in used]
+        if unused:
+            notes.append(
+                f"detected {result.detected} speaker(s) — using only {', '.join(sorted(used))}"
+            )
+        unprofiled = [c.name for c in voices if voice_f0.get(c.name) is None]
+        if unprofiled:
+            notes.append(
+                f"no pitch profile for {', '.join(unprofiled)} (run tools/analyze_voices.py)"
+            )
+        note = f" ⚠️ {'; '.join(notes)}" if notes else ""
+        await set_status(
+            f"⏳ {result.detected} speaker(s) → {diarize.result_summary(result)}{note}"
+        )
+
+        await asyncio.to_thread(self._slice_segments, source_path, result, workdir)
+        total = len(result.segments)
+        slices = [workdir / f"seg_{i:03d}.wav" for i in range(total)]
+        outs: list = [None] * total
+
+        # Convert grouped by voice: the RVC worker swaps models on every voice
+        # change, so grouping pays at most one model reload per voice instead
+        # of one per speaker alternation. Segments whose cluster went without
+        # a voice (all voices taken) stay original audio.
+        names = [c.name for c in voices]
+        assigned = [
+            i for i in range(total)
+            if result.segments[i].cluster in result.voice_of_cluster
+        ]
+        order = sorted(
+            assigned,
+            key=lambda i: (names.index(result.voice_of_cluster[result.segments[i].cluster]), i),
+        )
+        for done, i in enumerate(order, start=1):
+            cfg = next(
+                c for c in voices
+                if c.name == result.voice_of_cluster[result.segments[i].cluster]
+            )
+            try:
+                out_path = workdir / f"seg_{i:03d}_rvc.wav"
+                await self.pipeline.rvc.convert(
+                    input_path=str(slices[i]),
+                    output_path=str(out_path),
+                    model_path=cfg.rvc_model,
+                    index_path=cfg.rvc_index,
+                    pitch=cfg.pitch,
+                    index_rate=cfg.index_rate,
+                    f0_method=cfg.f0_method,
+                    speaker_id=cfg.speaker_id,
+                )
+                outs[i] = str(out_path)
+            except Exception as e:
+                raise RuntimeError(f"segment {done}/{len(order)} ({cfg.name}) failed: {e}") from e
+            if done % 5 == 0 or done == len(order):
+                await set_status(f"⏳ Converting segment {done}/{len(order)}...")
+
+        await asyncio.to_thread(
+            diarize.rebuild_timeline,
+            source_path,
+            result,
+            outs,  # str | None per segment; None keeps the original audio
+            str(workdir / "converted.wav"),
+        )
+        return result
+
+    @staticmethod
+    def _slice_segments(source_path: str, result, workdir) -> None:
+        """Write one wav per detected segment, cut from the source media."""
+        from ttsbot.media.audio import load_mono, slice_audio, write_wav
+
+        audio_np, sr = load_mono(source_path)
+        for i, seg in enumerate(result.segments):
+            chunk = slice_audio(audio_np, sr, seg.start, seg.end)
+            write_wav(str(workdir / f"seg_{i:03d}.wav"), chunk, sr)
 
     async def _process_speak(
         self,
@@ -576,8 +734,6 @@ async def main():
             rvc=RvcRunner(
                 infer_script="infer/cli.py",
                 rvc_root=str(PROJECT_ROOT / config.rvc_root),
-                device="cpu",
-                is_half=True,
                 use_worker=env["RVC_WORKER"],
             ),
         )

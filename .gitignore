@@ -26,6 +26,9 @@ venv/
 env/
 ENV/
 .venv/
+# Chatterbox/Nano pilot venv (pinned numpy<2 + torch 2.6 — must never merge
+# with the bot venv; see GPU_UPGRADE_PLAN.md)
+chatterbox-venv/
 
 # IDE
 .vscode/
@@ -56,3 +59,11 @@ models/
 
 # RVC voice models (large binaries; referenced via config, not committed)
 rvc_models/
+
+# Reference clips for zero-shot TTS/VC pilots (user-supplied recordings)
+reference-*.opus
+reference-*.wav
+
+# Generated per-voice pitch profiles (tools/analyze_voices.py, keyed by
+# model path + mtime + tuning; regenerate any time)
+config/voice_pitch.json
