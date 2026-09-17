@@ -1,13 +1,12 @@
-"""Phase 1 contract tests: GPU-server HTTP transport (network-free).
+"""GPU-server HTTP transport contract tests (network-free).
 
-Runner side fakes aiohttp.ClientSession; server side uses FastAPI's
-TestClient with the worker spawn disabled and a stubbed runner. No sockets,
-no subprocesses, no model weights.
+Covers the thin-client side only: RvcRunner remote-first convert() with a
+faked aiohttp.ClientSession, plus config parsing. Server-side endpoint
+tests live in the rvc-gpu-server submodule (tests/test_server.py).
 """
 
 import io
 
-import httpx
 import numpy as np
 import pytest
 import soundfile as sf
@@ -20,14 +19,6 @@ from ttsbot.rvc.runner import (
     RvcRunner,
     WorkerCrashed,
 )
-
-
-def _server():
-    """The server module lives in the desktop repo; fastapi is not installed
-    here, so server-side tests skip (client-side contract tests still run)."""
-    return pytest.importorskip(
-        "ttsbot.rvc.server", reason="server code lives in the desktop repo"
-    )
 
 
 def _sine_wav(path, sr=16000, secs=1.0, freq=440.0):
@@ -220,186 +211,3 @@ def test_gpu_server_env_parsing(monkeypatch):
     assert env["RVC_GPU_SERVER_TOKEN"] == "abc"
     assert env["RVC_GPU_SERVER_TIMEOUT"] == 60.0
 
-
-# ---- server: auth/protocol/model resolution units ----
-
-
-def test_check_auth():
-    pytest.importorskip("fastapi", reason="server code lives in the desktop repo")
-    from fastapi import HTTPException
-
-    check_auth = _server().check_auth
-    check_auth(None, "")  # no token configured -> open (LAN trust)
-    check_auth("Bearer abc", "abc")
-    with pytest.raises(HTTPException) as ei:
-        check_auth(None, "abc")
-    assert ei.value.status_code == 401
-    with pytest.raises(HTTPException):
-        check_auth("Bearer wrong", "abc")
-
-
-def test_check_protocol():
-    pytest.importorskip("fastapi", reason="server code lives in the desktop repo")
-    from fastapi import HTTPException
-
-    check_protocol = _server().check_protocol
-    check_protocol(PROTOCOL_VERSION)
-    with pytest.raises(HTTPException) as ei:
-        check_protocol("999")
-    assert ei.value.status_code == 400
-
-
-def test_resolve_model_path(tmp_path):
-    pytest.importorskip("fastapi", reason="server code lives in the desktop repo")
-    from fastapi import HTTPException
-
-    resolve_model_path = _server().resolve_model_path
-    verbatim = tmp_path / "voice.pth"
-    verbatim.write_bytes(b"x")
-    assert resolve_model_path(str(verbatim), "") == verbatim
-
-    flat_dir = tmp_path / "flat"
-    flat_dir.mkdir()
-    (flat_dir / "other.pth").write_bytes(b"x")
-    assert resolve_model_path("/elsewhere/other.pth", str(flat_dir)) == flat_dir / "other.pth"
-
-    with pytest.raises(HTTPException) as ei:
-        resolve_model_path("/elsewhere/missing.pth", str(flat_dir))
-    assert ei.value.status_code == 400
-
-
-# ---- server: HTTP endpoints via TestClient ----
-
-
-class _FakeProc:
-    pid = 1234
-
-
-class _FakeRunner:
-    """Stub for the server-owned RvcRunner (no subprocess, no weights)."""
-
-    worker_info = {"device": "cuda", "threads": 4}
-
-    def __init__(self, behavior="ok"):
-        self.behavior = behavior
-        self.seen_kwargs = None
-
-    async def _ensure_worker(self):
-        if self.behavior == "dead":
-            raise RuntimeError("worker died during startup")
-        return _FakeProc()
-
-    async def convert(self, **kwargs):
-        self.seen_kwargs = kwargs
-        if self.behavior == "request-error":
-            raise RVCRequestError("bad audio")
-        if self.behavior == "crash":
-            raise WorkerCrashed("worker died")
-        _sine_wav(kwargs["output_path"])
-        return str(kwargs["output_path"])
-
-
-def _client(tmp_path, behavior="ok", token=""):
-    """httpx client speaking ASGI directly (starlette 0.36's TestClient
-    predates the installed httpx and can't construct its Client)."""
-    model = tmp_path / "snake.pth"
-    model.write_bytes(b"fake-weights")
-    app = _server().create_app(rvc_root=str(tmp_path), require_token=token,
-                               start_worker=False)
-    app.state.runner = _FakeRunner(behavior)
-    client = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-    )
-    return client, model
-
-
-async def _post(client, wav_bytes, model, extra_headers=None):
-    headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
-    headers.update(extra_headers or {})
-    return await client.post(
-        "/convert",
-        files={"audio": ("in.wav", wav_bytes, "audio/wav")},
-        data={"model": str(model), "pitch": "-5", "f0_method": "pm"},
-        headers=headers,
-    )
-
-
-async def test_health_ok(tmp_path):
-    client, _ = _client(tmp_path)
-    r = await client.get("/health")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "ok"
-    assert body["protocol"] == PROTOCOL_VERSION
-    assert body["device"] == "cuda"
-    assert body["worker_pid"] == 1234
-
-
-async def test_health_degraded_when_worker_dead(tmp_path):
-    client, _ = _client(tmp_path, behavior="dead")
-    r = await client.get("/health")
-    assert r.status_code == 503
-    assert r.json()["status"] == "unavailable"
-
-
-async def test_convert_roundtrip(tmp_path):
-    client, model = _client(tmp_path)
-    r = await _post(client, _sine_bytes(), model)
-    assert r.status_code == 200
-    assert r.headers["content-type"] == "audio/wav"
-    data, sr = sf.read(io.BytesIO(r.content))
-    assert sr == 16000 and float(np.sqrt(np.mean(data**2))) > 0.005
-
-    fake = client._transport.app.state.runner
-    assert fake.seen_kwargs["model_path"] == str(model)
-    assert fake.seen_kwargs["pitch"] == -5
-    assert fake.seen_kwargs["f0_method"] == "pm"
-
-    health = (await client.get("/health")).json()
-    assert health["loaded_model"] == str(model)
-
-
-async def test_convert_rejects_bad_protocol(tmp_path):
-    client, model = _client(tmp_path)
-    r = await _post(client, _sine_bytes(), model, extra_headers={PROTOCOL_HEADER: "999"})
-    assert r.status_code == 400
-
-
-async def test_convert_auth(tmp_path):
-    client, model = _client(tmp_path, token="sekret")
-    assert (await _post(client, _sine_bytes(), model)).status_code == 401
-    ok = await _post(client, _sine_bytes(), model,
-                     extra_headers={"Authorization": "Bearer sekret"})
-    assert ok.status_code == 200
-
-
-async def test_convert_missing_model_is_400(tmp_path):
-    client, _ = _client(tmp_path)
-    r = await _post(client, _sine_bytes(), "/elsewhere/missing.pth")
-    assert r.status_code == 400
-
-
-async def test_convert_maps_request_error_to_400(tmp_path):
-    client, model = _client(tmp_path, behavior="request-error")
-    r = await _post(client, _sine_bytes(), model)
-    assert r.status_code == 400
-
-
-async def test_convert_maps_crash_to_503(tmp_path):
-    client, model = _client(tmp_path, behavior="crash")
-    r = await _post(client, _sine_bytes(), model)
-    assert r.status_code == 503
-
-
-async def test_convert_scratch_cleaned(tmp_path, monkeypatch):
-    import tempfile
-
-    scratch_root = tmp_path / "tmproot"
-    scratch_root.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(scratch_root))
-    client, model = _client(tmp_path)
-    r = await _post(client, _sine_bytes(), model)
-    assert r.status_code == 200
-    server_dir = scratch_root / "rvc_server"
-    leftovers = list(server_dir.rglob("*")) if server_dir.exists() else []
-    assert leftovers == []

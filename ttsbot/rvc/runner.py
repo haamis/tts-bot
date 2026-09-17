@@ -11,8 +11,8 @@ log = logging.getLogger("ttsbot.rvc")
 
 WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
 
-# GPU-server HTTP contract (ttsbot/rvc/server.py). Bumped only on breaking
-# changes; the server rejects mismatched clients with 400 (deterministic).
+# GPU-server HTTP contract (server lives in the rvc-gpu-server submodule).
+# Bumped only on breaking changes; mismatched clients get 400 (deterministic).
 PROTOCOL_VERSION = "1"
 PROTOCOL_HEADER = "X-RVC-Protocol"
 

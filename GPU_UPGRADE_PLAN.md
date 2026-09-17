@@ -102,9 +102,9 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   (pytest stays network-free), real-LAN smoke via `test_pipeline.py`
   pointed at the server.
   - [x] IMPLEMENTED 2026-09-17 (thin-client side + server code, no GPU
-    needed): `ttsbot/rvc/server.py` (`/health` with device/threads/loaded
+    needed): `rvc-gpu-server/server.py` (`/health` with device/threads/loaded
     model, `/convert` multipart -> wav, Bearer auth, protocol-version
-    header, single-job via the runner's `_worker_lock`, scratch cleanup);
+    header, single-job lock, scratch cleanup);
     `RvcRunner(server_url/token/timeout)` remote-first with 4xx fail-fast
     and transport/5xx local-slow-path fallback (+ `last_via`, slow-path
     status note in bot); config `RVC_GPU_SERVER_URL/TOKEN/TIMEOUT`;
@@ -431,12 +431,12 @@ Thin client:
 8. Local-fallback venv stays intact on the thin client (decide Phase 3
    slimming only after a few weeks of remote-only stability).
 
-## Sub-repo: rvc-gpu-server (scaffolded 2026-09-17, pending GitHub + submodule)
+## Sub-repo: rvc-gpu-server (live 2026-09-18, submodule wired)
 
 Per user decision the desktop code lives in its own repo, pinned as a git
-submodule (like `rvc_infer`). Staged at `~/rvc-gpu-server` on ifrit AND
-`/home/haama/rvc-gpu-server` on the thin client (identical content; the
-thin copy is the staging source until git exists):
+submodule at `rvc-gpu-server/` (like `rvc_infer`). Live at `~/rvc-gpu-server`
+on ifrit as a real `git clone` of `haamis/rvc-gpu-server` (update with
+`git pull`; pushes go from the thin side):
 
 - `server.py` — FastAPI shell, self-contained (no ttsbot imports).
 - `worker_owner.py` — worker subprocess owner, stdlib-only (5 tests).
@@ -450,8 +450,5 @@ Fixes found during bring-up (already in the code): `ffmpeg-python` was
 missing from the desktop stack (worker import failed); model resolution is
 basename-recursive under `RVC_MODEL_ROOT` (per-voice subdirs preserved).
 
-Still TODO: user creates the GitHub repo -> `git init + push` from the
-staging copy -> `git submodule add <url> gpu-server` in TTS-bot -> delete
-thin `ttsbot/rvc/server.py` (server tests move with it; client contract
-tests in `tests/test_rvc_remote.py` stay) -> `RVC_GPU_SERVER_TOKEN` +
-server persistence (systemd user unit or similar; currently manual nohup).
+Still TODO: `RVC_GPU_SERVER_TOKEN` + server persistence (currently manual
+nohup).

@@ -30,7 +30,7 @@ python -m ttsbot.bot            # live bot (needs real DISCORD_TOKEN in .env)
 | `ttsbot/tts/openrouter_tts.py` | OpenRouter `/audio/speech` client (pcm -> WAV wrap) |
 | `ttsbot/tts/piper_runner.py` | local Piper; anchored model paths; `--length-scale 1/speed` |
 | `ttsbot/rvc/runner.py` | worker client + subprocess fallback; `RVCRequestError` vs `WorkerCrashed` |
-| `ttsbot/rvc/server.py` | GPU desktop server: `/health` + `/convert`, owns worker via RvcRunner; protocol `X-RVC-Protocol: 1` |
+| `rvc-gpu-server/` (submodule) | desktop FastAPI server: `/health` + `/convert`, owns worker via worker_owner.py; protocol `X-RVC-Protocol: 1` |
 | `ttsbot/rvc/worker.py` | persistent RVC worker (JSON lines on stdin/stdout) |
 | `ttsbot/media/ytdlp_runner.py` | yt-dlp probe/download + duration cap |
 | `ttsbot/media/diarize.py` | Multi-voice `!rvc` diarization: wav2vec2 embeddings -> clustering -> pitch-ranked voice assignment; `tools/analyze_voices.py` builds `config/voice_pitch.json` |

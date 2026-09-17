@@ -278,7 +278,7 @@ Optimizations and their tradeoffs:
 
 With a GPU desktop on the LAN, RVC conversion moves off the thin client:
 
-- **Desktop**: `python -m ttsbot.rvc.server` (needs `fastapi`, `uvicorn`,
+- **Desktop**: `cd rvc-gpu-server && python server.py` (submodule; needs `fastapi`,
   `python-multipart` plus the RVC stack with the CUDA torch wheel).
   Exposes `POST /convert` (audio + RVC params -> converted wav),
   `GET /health` (status, `device`, loaded model). It owns the same
