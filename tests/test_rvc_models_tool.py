@@ -112,10 +112,11 @@ def test_insert_appends_inside_voices_section(tmp_path):
 
     data = yaml.safe_load(text)
     entry = data["voices"]["newvoice"]
-    assert entry["rvc_model"] == str(pth)
-    assert entry["rvc_index"] == str(index)
-    assert entry["f0_method"] == "pm"
-    assert entry["pitch"] == 0
+    assert entry["rvc"]["model"] == str(pth)
+    assert entry["rvc"]["index"] == str(index)
+    assert entry["rvc"]["f0_method"] == "pm"
+    assert entry["rvc"]["pitch"] == 0
+    assert entry["piper"]["voice"] == "en_US-lessac-medium"
     # untouched sibling preserved
     assert data["voices"]["snake"]["pitch"] == -5
     # new block comes after snake in the voices section
@@ -137,7 +138,7 @@ def test_insert_indexless_voice(tmp_path):
     cfg.write_text(BASE_CONFIG)
     add_voice_to_config(cfg, "noidx", Path("/m/Voice.pth"), None, "t", force=False)
     data = yaml.safe_load(cfg.read_text())
-    assert "rvc_index" not in data["voices"]["noidx"]
+    assert "index" not in data["voices"]["noidx"]["rvc"]
 
 
 def test_duplicate_voice_rejected(tmp_path):

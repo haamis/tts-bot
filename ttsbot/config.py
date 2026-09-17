@@ -41,37 +41,52 @@ class VoiceConfig:
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "VoiceConfig":
-        # Legacy fallback: a plain `speed:` key sets all mechanisms
+        # Canonical shape groups options per provider:
+        #   kokoro: {voice, speed}  cloud: {voice, speed}
+        #   piper: {voice, speed}   rvc: {model, index, pitch, ...}
+        # Flat legacy keys (tts, rvc_model, cloud_voice, speed_cloud, ...)
+        # still parse, group wins on conflict. A plain `speed:` sets all
+        # three tiers (legacy).
+        kokoro = data.get("kokoro") or {}
+        cloud = data.get("cloud") or {}
+        piper = data.get("piper") or {}
+        rvc = data.get("rvc") or {}
+        legacy_speed = data.get("speed", 1.0)
+        tts = piper.get("voice", data.get("tts"))
+        if not tts:
+            raise KeyError(f"voice '{name}' needs piper.voice (legacy: tts)")
+        rvc_model = rvc.get("model", data.get("rvc_model"))
+        if not rvc_model:
+            raise KeyError(f"voice '{name}' needs rvc.model (legacy: rvc_model)")
         return cls(
             name=name,
-            tts=data["tts"],
-            rvc_model=data["rvc_model"],
-            rvc_index=data.get("rvc_index"),
-            pitch=data.get("pitch", 0),
-            index_rate=data.get("index_rate", 0.75),
-            f0_method=data.get("f0_method", "rmvpe"),
-            speaker_id=data.get("speaker_id", 0),
-            speed_cloud=data.get("speed_cloud", data.get("speed", 1.0)),
-            speed_local=data.get("speed_local", data.get("speed", 1.0)),
-            speed_kokoro=data.get("speed_kokoro", data.get("speed", 1.0)),
-            cloud_voice=data.get("cloud_voice"),
-            kokoro_voice=data.get("kokoro_voice"),
+            tts=tts,
+            rvc_model=rvc_model,
+            rvc_index=rvc.get("index", data.get("rvc_index")),
+            pitch=rvc.get("pitch", data.get("pitch", 0)),
+            index_rate=rvc.get("index_rate", data.get("index_rate", 0.75)),
+            f0_method=rvc.get("f0_method", data.get("f0_method", "rmvpe")),
+            speaker_id=rvc.get("speaker_id", data.get("speaker_id", 0)),
+            speed_cloud=cloud.get("speed", data.get("speed_cloud", legacy_speed)),
+            speed_local=piper.get("speed", data.get("speed_local", legacy_speed)),
+            speed_kokoro=kokoro.get("speed", data.get("speed_kokoro", legacy_speed)),
+            cloud_voice=cloud.get("voice", data.get("cloud_voice")),
+            kokoro_voice=kokoro.get("voice", data.get("kokoro_voice")),
         )
 
     def to_dict(self) -> dict:
         return {
-            "tts": self.tts,
-            "rvc_model": self.rvc_model,
-            "rvc_index": self.rvc_index,
-            "pitch": self.pitch,
-            "index_rate": self.index_rate,
-            "f0_method": self.f0_method,
-            "speaker_id": self.speaker_id,
-            "speed_cloud": self.speed_cloud,
-            "speed_local": self.speed_local,
-            "speed_kokoro": self.speed_kokoro,
-            "cloud_voice": self.cloud_voice,
-            "kokoro_voice": self.kokoro_voice,
+            "kokoro": {"voice": self.kokoro_voice, "speed": self.speed_kokoro},
+            "cloud": {"voice": self.cloud_voice, "speed": self.speed_cloud},
+            "piper": {"voice": self.tts, "speed": self.speed_local},
+            "rvc": {
+                "model": self.rvc_model,
+                "index": self.rvc_index,
+                "pitch": self.pitch,
+                "index_rate": self.index_rate,
+                "f0_method": self.f0_method,
+                "speaker_id": self.speaker_id,
+            },
         }
 
 

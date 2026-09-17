@@ -5,70 +5,44 @@ default_tts: en_US-lessac-medium
 generate_prompt_suffix: Use a maximum of 4500 characters.
 ffmpeg_path: ffmpeg
 rvc_root: rvc_infer
+# Per-voice options, grouped by provider. Speeds are per-mechanism (they
+# behave differently, so one number can't serve all): kokoro speed = its
+# native param, cloud speed = ffmpeg atempo post-processing, piper speed =
+# --length-scale. 1.0 = normal. A plain `speed:` key still works and sets
+# all three (legacy), as do the old flat keys (tts, rvc_model, ...).
 voices:
   snake:
-    tts: en_US-ryan-medium
-    rvc_model: /home/haama/TTS-bot/rvc_models/snake/SSNAKE.pth
-    rvc_index: /home/haama/TTS-bot/rvc_models/snake/added_IVF967_Flat_nprobe_1_SSNAKE_v2.index
-    pitch: -5
-    index_rate: 0.85
+    kokoro: {voice: am_adam, speed: 1.0}
+    cloud: {voice: flux-donovan-en, speed: 1.0}
+    piper: {voice: en_US-ryan-medium, speed: 0.7}
     # f0_method: "pm" is ~2x faster on CPU (fine for clean TTS input);
     # "rmvpe" is more accurate for real-world/noisy audio (e.g. !rvc on songs)
-    f0_method: pm
-    speaker_id: 0
-    # TTS speaking speed, separate for cloud and local TTS because they
-    # behave differently: cloud speed = ffmpeg atempo post-processing,
-    # local speed = Piper --length-scale. 1.0 = normal, 1.2 = 20% faster,
-    # 0.8 = slower. Above ~1.5 gets robotic, below ~0.7 drags.
-    # A plain `speed:` key still works and sets both (legacy).
-    speed_cloud: 1.0
-    speed_local: 0.7
-    # Cloud TTS (deepgram/flux-tts:free via OpenRouter) voice for this
-    # character. Local Piper is used as fallback on rate-limit/error, and
-    # always when cloud_voice is unset. Voice catalog:
-    # https://openrouter.ai/deepgram/flux-tts:free
-    cloud_voice: flux-donovan-en
+    rvc: {model: /home/haama/TTS-bot/rvc_models/snake/SSNAKE.pth,
+          index: /home/haama/TTS-bot/rvc_models/snake/added_IVF967_Flat_nprobe_1_SSNAKE_v2.index,
+          pitch: -5, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   trump:
-    tts: en_US-ryan-medium
-    rvc_model: /home/haama/TTS-bot/rvc_models/trump/trump.pth
-    rvc_index: /home/haama/TTS-bot/rvc_models/trump/added_IVF1170_Flat_nprobe_1_trump_v2.index
-    pitch: 0
-    index_rate: 0.85
-    f0_method: pm
-    speaker_id: 0
-    speed_cloud: 1.0
-    speed_local: 0.7
-    cloud_voice: flux-donovan-en
+    kokoro: {voice: am_adam, speed: 1.0}
+    cloud: {voice: flux-donovan-en, speed: 1.0}
+    piper: {voice: en_US-ryan-medium, speed: 0.7}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/trump/trump.pth,
+          index: /home/haama/TTS-bot/rvc_models/trump/added_IVF1170_Flat_nprobe_1_trump_v2.index,
+          pitch: 0, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   billy:
-    tts: en_US-ryan-medium
-    rvc_model: /home/haama/TTS-bot/rvc_models/billy/BillyModel.pth
-    rvc_index: /home/haama/TTS-bot/rvc_models/billy/added_IVF256_Flat_nprobe_1_BillyModel_v2.index
-    pitch: 2
-    index_rate: 0.85
-    f0_method: pm
-    speaker_id: 0
-    speed_cloud: 1.0
-    speed_local: 0.7
-    cloud_voice: flux-donovan-en
+    piper: {voice: en_US-ryan-medium, speed: 0.7}
+    cloud: {voice: flux-donovan-en, speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/billy/BillyModel.pth,
+          index: /home/haama/TTS-bot/rvc_models/billy/added_IVF256_Flat_nprobe_1_BillyModel_v2.index,
+          pitch: 2, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   otacon:
-    tts: en_US-ryan-medium
-    rvc_model: /home/haama/TTS-bot/rvc_models/otacon/Otacon.pth
-    rvc_index: /home/haama/TTS-bot/rvc_models/otacon/added_IVF373_Flat_nprobe_1_Otacon_v2.index
-    pitch: 0
-    index_rate: 0.85
-    f0_method: pm
-    speaker_id: 0
-    speed_cloud: 1.0
-    speed_local: 0.7
-    cloud_voice: flux-donovan-en
+    piper: {voice: en_US-ryan-medium, speed: 0.7}
+    cloud: {voice: flux-donovan-en, speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/otacon/Otacon.pth,
+          index: /home/haama/TTS-bot/rvc_models/otacon/added_IVF373_Flat_nprobe_1_Otacon_v2.index,
+          pitch: 0, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   colonel:
-    tts: en_US-lessac-medium
-    rvc_model: /home/haama/TTS-bot/rvc_models/rcampbell_rvcv2_rmvpe_400e/Rcambell.pth
-    rvc_index: /home/haama/TTS-bot/rvc_models/rcampbell_rvcv2_rmvpe_400e/added_IVF400_Flat_nprobe_1_Rcambell_v2.index
-    pitch: -5
-    index_rate: 0.75
-    f0_method: pm
-    speaker_id: 0
-    speed_cloud: 1.0
-    speed_local: 0.7
+    kokoro: {voice: am_adam, speed: 1.0}
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/rcampbell_rvcv2_rmvpe_400e/Rcambell.pth,
+          index: /home/haama/TTS-bot/rvc_models/rcampbell_rvcv2_rmvpe_400e/added_IVF400_Flat_nprobe_1_Rcambell_v2.index,
+          pitch: -5, index_rate: 0.75, f0_method: pm, speaker_id: 0}
     # Added by tools/rvc_models.py — https://voice-models.com/model/ 'RCampbell_RVCv2_rmvpe_400E.zip'

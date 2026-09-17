@@ -85,19 +85,19 @@ sudo apt update && sudo apt install -y ffmpeg libsodium-dev
    "extractor_args": {"youtubepot-bgutilhttp": {"base_url": ["http://host:4416"]}}
    ```
 
-7. **Configure voices** in `config/voices.yaml`:
+7. **Configure voices** in `config/voices.yaml` (options grouped by
+   provider; limits live in `.env`):
    ```yaml
    default_tts: en_US-lessac-medium
    ffmpeg_path: ffmpeg
    rvc_root: rvc_infer
    voices:
      snake:
-       tts: en_US-lessac-medium
-       rvc_model: /path/to/snake.pth
-       rvc_index: /path/to/snake.index
-       pitch: 0
-       index_rate: 0.75
-       f0_method: rmvpe
+       kokoro: {voice: am_adam, speed: 1.0}
+       cloud: {voice: flux-donovan-en, speed: 1.0}
+       piper: {voice: en_US-ryan-medium, speed: 0.7}
+       rvc: {model: /path/to/snake.pth, index: /path/to/snake.index,
+             pitch: 0, index_rate: 0.75, f0_method: rmvpe, speaker_id: 0}
        speaker_id: 0
      trump:
        tts: en_US-ryan-medium
