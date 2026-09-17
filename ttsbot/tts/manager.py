@@ -1,8 +1,10 @@
-"""TTS orchestration: cloud TTS primary, local Piper fallback.
+"""TTS orchestration: Kokoro (local neural) -> cloud -> Piper fallback.
 
-Rate limits (HTTP 429) put the cloud provider on cooldown; during cooldown
-requests go straight to local Piper. Each synthesize() returns a TTSResult so
-callers can surface fallback notes to the user.
+Kokoro is the primary tier (user-listened verdict: preferred over both
+Piper and cloud — RVC erases donor identity, so Kokoro's prosody is what
+matters). Cloud sits second when a key and voice are configured
+(rate limits put it on cooldown); Piper is the last resort. Each
+synthesize() returns a TTSResult so callers can surface fallback notes.
 """
 import asyncio
 import logging
@@ -11,6 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ttsbot.tts.kokoro_runner import KokoroRunner
 from ttsbot.tts.openrouter_tts import (
     DEFAULT_SAMPLE_RATE,
     DEFAULT_TTS_MODEL,
@@ -25,8 +28,8 @@ log = logging.getLogger("ttsbot.tts")
 @dataclass
 class TTSResult:
     path: str
-    provider: str  # "cloud" | "piper"
-    note: str | None = None
+    provider: str  # "kokoro" | "cloud" | "piper"
+    note: str | None = None  # first skipped tier's reason, if any
 
 
 class TTSManager:
@@ -34,39 +37,74 @@ class TTSManager:
         self,
         piper: PiperRunner,
         cloud: OpenRouterTTSProvider | None = None,
+        kokoro: KokoroRunner | None = None,
+        default_kokoro_voice: str | None = None,
+        cloud_first: bool = False,
         cooldown: float = 300.0,
         ffmpeg_path: str = "ffmpeg",
     ):
         self.piper = piper
         self.cloud = cloud
+        self.kokoro = kokoro
+        self.default_kokoro_voice = default_kokoro_voice
+        self.cloud_first = cloud_first
         self.cooldown = cooldown
         self.ffmpeg_path = ffmpeg_path
         self._cooldown_until = 0.0  # time.monotonic()
 
+    def _kokoro_voice_for(self, voice_cfg) -> str | None:
+        return voice_cfg.kokoro_voice or self.default_kokoro_voice
+
     async def synthesize(self, text: str, output_path: str | Path, voice_cfg) -> TTSResult:
         output_path = str(output_path)
+        note = None
 
-        if self.cloud and voice_cfg.cloud_voice and not self._in_cooldown():
-            try:
-                path = await self.cloud.synthesize(text, output_path, voice_cfg.cloud_voice)
-                await self._apply_speed_cloud(path, voice_cfg.speed_cloud)
-                return TTSResult(path=path, provider="cloud")
-            except CloudTTSRateLimited as e:
-                self._cooldown_until = time.monotonic() + self.cooldown
-                log.warning(
-                    "Cloud TTS rate-limited; cooling down %.0fs and using local TTS", self.cooldown
-                )
-                note = str(e)
-            except Exception as e:
-                log.warning("Cloud TTS failed (%s); using local TTS", e)
-                note = f"cloud TTS error: {e}"
-        else:
-            note = None
+        tiers = [self._try_kokoro, self._try_cloud]
+        if self.cloud_first:
+            tiers.reverse()
+        for tier in tiers:
+            result, note = await tier(text, output_path, voice_cfg, note)
+            if result is not None:
+                return result
 
-        # Local fallback
+        # Last resort: Piper
         await ensure_piper_voice(voice_cfg.tts)
         path = await self.piper.synthesize(voice_cfg.tts, text, output_path, speed=voice_cfg.speed_local)
         return TTSResult(path=path, provider="piper", note=note)
+
+    async def _try_kokoro(self, text, output_path, voice_cfg, note):
+        """(TTSResult | None, note): None means 'skip to the next tier'."""
+        kokoro_voice = self._kokoro_voice_for(voice_cfg)
+        if self.kokoro is None or not kokoro_voice:
+            return None, note
+        try:
+            path = await self.kokoro.synthesize(
+                kokoro_voice, text, output_path, speed=voice_cfg.speed_kokoro
+            )
+            return TTSResult(path=path, provider="kokoro", note=note), note
+        except Exception as e:
+            log.warning("Kokoro TTS failed (%s); trying next tier", e)
+            err = f"kokoro TTS error: {e}"
+            return None, err if note is None else f"{note}; {err}"
+
+    async def _try_cloud(self, text, output_path, voice_cfg, note):
+        """(TTSResult | None, note): None means 'skip to the next tier'."""
+        if not (self.cloud and voice_cfg.cloud_voice and not self._in_cooldown()):
+            return None, note
+        try:
+            path = await self.cloud.synthesize(text, output_path, voice_cfg.cloud_voice)
+            await self._apply_speed_cloud(path, voice_cfg.speed_cloud)
+            return TTSResult(path=path, provider="cloud", note=note), note
+        except CloudTTSRateLimited as e:
+            self._cooldown_until = time.monotonic() + self.cooldown
+            log.warning(
+                "Cloud TTS rate-limited; cooling down %.0fs and using local TTS", self.cooldown
+            )
+            err = str(e)
+        except Exception as e:
+            log.warning("Cloud TTS failed (%s); using local TTS", e)
+            err = f"cloud TTS error: {e}"
+        return None, err if note is None else f"{note}; {err}"
 
     def _in_cooldown(self) -> bool:
         return time.monotonic() < self._cooldown_until
@@ -98,12 +136,21 @@ class TTSManager:
 def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
     """Construct a TTSManager from the load_env() dict.
 
-    TTS_PROVIDER: "auto" (cloud when an API key is present), "local", or
-    "openrouter" (cloud; warns if the key is missing).
+    TTS_PROVIDER: "auto" (Kokoro -> cloud when a key is present -> Piper),
+    "local" (Kokoro -> Piper, no cloud), or "openrouter" (cloud first, then
+    Kokoro -> Piper; warns if the key is missing). KOKORO_VOICE is the donor
+    voice for characters without their own `kokoro_voice:` (RVC erases donor
+    identity, so one good prosody donor serves all voices); empty disables
+    the Kokoro tier.
     """
     piper = PiperRunner()
     provider = env.get("TTS_PROVIDER", "auto")
     key = env.get("OPENROUTER_API_KEY", "")
+
+    kokoro = None
+    default_kokoro_voice = env.get("KOKORO_VOICE", "af_heart") or None
+    if provider in ("auto", "local") or default_kokoro_voice:
+        kokoro = KokoroRunner()
 
     cloud = None
     if provider != "local":
@@ -121,6 +168,9 @@ def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
     return TTSManager(
         piper=piper,
         cloud=cloud,
+        kokoro=kokoro,
+        default_kokoro_voice=default_kokoro_voice,
+        cloud_first=(provider == "openrouter"),
         cooldown=float(env.get("CLOUD_TTS_COOLDOWN", 300.0)),
         ffmpeg_path=ffmpeg_path,
     )

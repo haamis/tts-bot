@@ -21,7 +21,9 @@ class VoiceConfig:
         speaker_id: int = 0,
         speed_cloud: float = 1.0,
         speed_local: float = 1.0,
+        speed_kokoro: float = 1.0,
         cloud_voice: Optional[str] = None,
+        kokoro_voice: Optional[str] = None,
     ):
         self.name = name
         self.tts = tts
@@ -33,11 +35,13 @@ class VoiceConfig:
         self.speaker_id = speaker_id
         self.speed_cloud = speed_cloud
         self.speed_local = speed_local
+        self.speed_kokoro = speed_kokoro
         self.cloud_voice = cloud_voice
+        self.kokoro_voice = kokoro_voice
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "VoiceConfig":
-        # Legacy fallback: a plain `speed:` key sets both mechanisms
+        # Legacy fallback: a plain `speed:` key sets all mechanisms
         return cls(
             name=name,
             tts=data["tts"],
@@ -49,7 +53,9 @@ class VoiceConfig:
             speaker_id=data.get("speaker_id", 0),
             speed_cloud=data.get("speed_cloud", data.get("speed", 1.0)),
             speed_local=data.get("speed_local", data.get("speed", 1.0)),
+            speed_kokoro=data.get("speed_kokoro", data.get("speed", 1.0)),
             cloud_voice=data.get("cloud_voice"),
+            kokoro_voice=data.get("kokoro_voice"),
         )
 
     def to_dict(self) -> dict:
@@ -63,7 +69,9 @@ class VoiceConfig:
             "speaker_id": self.speaker_id,
             "speed_cloud": self.speed_cloud,
             "speed_local": self.speed_local,
+            "speed_kokoro": self.speed_kokoro,
             "cloud_voice": self.cloud_voice,
+            "kokoro_voice": self.kokoro_voice,
         }
 
 
@@ -118,6 +126,10 @@ def load_env() -> dict:
         # Character cap for !speak/!generate text (voices.yaml holds voice
         # config only; all limits live here in .env).
         "MAX_CHARS": int(os.getenv("MAX_CHARS", "500")),
+        # Kokoro donor voice for characters without their own kokoro_voice:
+        # RVC erases donor identity, so one prosody donor serves all voices.
+        # Empty disables the Kokoro tier.
+        "KOKORO_VOICE": os.getenv("KOKORO_VOICE", "af_heart"),
         "GUILD_IDS": [
             int(x.strip()) for x in os.getenv("GUILD_IDS", "").split(",") if x.strip()
         ],

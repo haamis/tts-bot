@@ -525,6 +525,42 @@ def test_diarize_media_two_speakers(tmp_path):
     assert f0_snake > f0_trump
 
 
+def test_analyze_finalize_matches_diarize_media(tmp_path):
+    """The Phase 2 split is behavior-preserving: analyze + finalize locally
+    must equal the monolithic path (server returns the analysis as JSON)."""
+    sr = 16000
+    audio = np.concatenate([
+        sine(110, 4.0, sr=sr),
+        np.zeros(3 * sr, np.float32),
+        sine(250, 4.0, sr=sr),
+        np.zeros(1 * sr, np.float32),
+    ])
+    src = tmp_path / "media.wav"
+    write_wav(str(src), audio, sr)
+    kwargs = dict(
+        voices=["trump", "snake"],
+        voice_f0={"trump": 115.0, "snake": 210.0},
+        threshold=0.0,
+    )
+    full = diarize.diarize_media(
+        str(src), **kwargs,
+        embed_fn=fake_embed_factory([0, 0, 1, 1, 1, 1]),
+        f0_fn=diarize.measure_f0,
+    )
+    analysis = diarize.analyze_media(
+        str(src), 2, 0.0,
+        embed_fn=fake_embed_factory([0, 0, 1, 1, 1, 1]),
+        f0_fn=diarize.measure_f0,
+    )
+    split = diarize.finalize_result(analysis, str(src), kwargs["voices"], kwargs["voice_f0"])
+    assert split.detected == full.detected
+    assert [(s.start, s.end, s.cluster) for s in split.segments] == [
+        (s.start, s.end, s.cluster) for s in full.segments
+    ]
+    assert split.voice_of_cluster == full.voice_of_cluster
+    assert split.cluster_f0 == full.cluster_f0
+
+
 def test_diarize_media_rebuild_timeline(tmp_path):
     sr = 16000
     audio = np.concatenate([sine(110, 3.0, sr=sr), np.zeros(2 * sr, np.float32), sine(250, 3.0, sr=sr)])

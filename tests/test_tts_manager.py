@@ -88,8 +88,27 @@ def make_voice(**overrides):
     return VoiceConfig.from_dict("test", data)
 
 
-def make_manager(cloud=None, cooldown=300.0):
-    return TTSManager(piper=FakePiper(), cloud=cloud, cooldown=cooldown)
+def make_manager(cloud=None, cooldown=300.0, kokoro=None, default_kokoro_voice=None,
+                 cloud_first=False):
+    return TTSManager(
+        piper=FakePiper(), cloud=cloud, kokoro=kokoro,
+        default_kokoro_voice=default_kokoro_voice, cloud_first=cloud_first,
+        cooldown=cooldown,
+    )
+
+
+class FakeKokoro:
+    def __init__(self, behavior="ok"):
+        self.behavior = behavior
+        self.calls = []
+
+    async def synthesize(self, voice, text, output_path, speed=1.0):
+        self.calls.append((voice, text, output_path, speed))
+        if self.behavior == "error":
+            raise RuntimeError("kokoro exploded")
+        samples = (np.sin(np.linspace(0, 440 * 2 * np.pi, 24000)) * 10000).astype("int16")
+        sf.write(output_path, samples, 24000, subtype="PCM_16")
+        return output_path
 
 
 @pytest.mark.asyncio
@@ -180,3 +199,73 @@ def test_legacy_speed_key_sets_both():
     vc = VoiceConfig.from_dict("t", {"tts": "x", "rvc_model": "m", "speed": 0.8})
     assert vc.speed_cloud == 0.8
     assert vc.speed_local == 0.8
+    assert vc.speed_kokoro == 0.8
+
+
+# ---- Kokoro tier ----
+
+def make_kokoro_voice(**overrides):
+    data = {
+        "tts": "en_US-lessac-medium",
+        "rvc_model": "/fake/model.pth",
+        "cloud_voice": "amara",
+        "kokoro_voice": "af_heart",
+        "speed_kokoro": 1.0,
+    }
+    data.update(overrides)
+    return VoiceConfig.from_dict("test", data)
+
+
+@pytest.mark.asyncio
+async def test_kokoro_first_success_skips_rest(tmp_path):
+    mgr = make_manager(cloud=FakeCloud("ok"), kokoro=FakeKokoro("ok"))
+    res = await mgr.synthesize("hello", tmp_path / "out.wav", make_kokoro_voice())
+    assert res.provider == "kokoro"
+    assert res.note is None
+    assert len(mgr.kokoro.calls) == 1
+    assert mgr.kokoro.calls[0][0] == "af_heart"
+    assert mgr.cloud.calls == [] and mgr.piper.calls == []
+
+
+@pytest.mark.asyncio
+async def test_kokoro_uses_default_voice_and_speed(tmp_path):
+    mgr = make_manager(cloud=None, kokoro=FakeKokoro("ok"), default_kokoro_voice="af_bella")
+    voice = make_kokoro_voice(kokoro_voice=None, speed_kokoro=1.2)
+    res = await mgr.synthesize("hello", tmp_path / "out.wav", voice)
+    assert res.provider == "kokoro"
+    assert mgr.kokoro.calls[0][0] == "af_bella"
+    assert mgr.kokoro.calls[0][3] == 1.2
+
+
+@pytest.mark.asyncio
+async def test_kokoro_error_falls_to_cloud_with_note(tmp_path):
+    mgr = make_manager(cloud=FakeCloud("ok"), kokoro=FakeKokoro("error"))
+    res = await mgr.synthesize("hello", tmp_path / "out.wav", make_kokoro_voice())
+    assert res.provider == "cloud"
+    assert "kokoro TTS error" in res.note
+
+
+@pytest.mark.asyncio
+async def test_kokoro_and_cloud_errors_fall_to_piper(tmp_path):
+    mgr = make_manager(cloud=FakeCloud("error"), kokoro=FakeKokoro("error"))
+    res = await mgr.synthesize("hello", tmp_path / "out.wav", make_kokoro_voice())
+    assert res.provider == "piper"
+    assert "kokoro TTS error" in res.note and "cloud TTS error" in res.note
+
+
+@pytest.mark.asyncio
+async def test_no_kokoro_voice_skips_tier_silently(tmp_path):
+    mgr = make_manager(cloud=None, kokoro=FakeKokoro("ok"))
+    voice = make_kokoro_voice(kokoro_voice=None)
+    res = await mgr.synthesize("hello", tmp_path / "out.wav", voice)
+    assert res.provider == "piper"
+    assert res.note is None
+    assert mgr.kokoro.calls == []
+
+
+@pytest.mark.asyncio
+async def test_cloud_first_ordering(tmp_path):
+    mgr = make_manager(cloud=FakeCloud("ok"), kokoro=FakeKokoro("ok"), cloud_first=True)
+    res = await mgr.synthesize("hello", tmp_path / "out.wav", make_kokoro_voice())
+    assert res.provider == "cloud"
+    assert mgr.kokoro.calls == []

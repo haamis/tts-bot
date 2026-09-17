@@ -2,7 +2,7 @@ default_tts: en_US-lessac-medium
 # NOTE: voice config only — all limits (MAX_CHARS, MAX_MEDIA_SECONDS, ...)
 # live in .env. A stale `max_chars:` key here is ignored.
 # Extra text appended (after a newline) to every !generate prompt.
-generate_prompt_suffix: Use a maximum of 900 characters.
+generate_prompt_suffix: Use a maximum of 4500 characters.
 ffmpeg_path: ffmpeg
 rvc_root: rvc_infer
 voices:

@@ -24,11 +24,13 @@ from ttsbot.media.diarize import (
     MIN_SPEAKER_FRAC,
     MIN_SPEAKER_S,
     SAMPLE_RATE,
+    DiarizationAnalysis,
     DiarizationResult,
     Segment,
-    absorb_audible_gaps,
-    assign_voices,
+    _resolve_device,
     cluster_f0s,
+    finalize_result,
+    measure_f0,
 )
 
 log = logging.getLogger("ttsbot.media.diarize.pyannote")
@@ -118,10 +120,29 @@ def diarize_media_pyannote(
     no-collapse mode. `run_fn` injects a fake pipeline in tests. Raises on
     failure; callers own the fallback.
     """
+    analysis = analyze_media_pyannote(
+        path, len(voices), threshold, hf_token, device=device, run_fn=run_fn
+    )
+    return finalize_result(analysis, path, voices, voice_f0)
+
+
+def analyze_media_pyannote(
+    path: str,
+    num_voices: int,
+    threshold: float,
+    hf_token: str,
+    device: str = "cpu",
+    run_fn=None,
+) -> DiarizationAnalysis:
+    """pyannote pipeline through per-cluster pitch (no voice assignment).
+
+    Server-side half, mirroring diarize.analyze_media: segments (noise
+    clusters dropped) + cluster f0s + detected count. Raises on failure.
+    """
     import time
 
     t0 = time.time()
-    k = len(voices)
+    k = num_voices
     if run_fn is None:
         pipeline = _get_pipeline(hf_token, device)
 
@@ -164,20 +185,12 @@ def diarize_media_pyannote(
     if not kept:
         raise ValueError("no sustained speech found (all speech runs too short)")
 
-    f0s = {c: f for c, f in cluster_f0s(audio16k, segments).items() if c in kept}
-    first_appearance = list(dict.fromkeys(s.cluster for s in segments))
-    mapping = assign_voices(f0s, voices, voice_f0, first_appearance)
-    segments = absorb_audible_gaps(audio16k, segments)
-    log.info(
-        "Voice assignment: %s",
-        ", ".join(
-            f"speaker {c} ({f0s[c] and round(f0s[c]) or '?'}Hz) -> {v}"
-            for c, v in mapping.items()
-        ),
-    )
-    return DiarizationResult(
-        segments=segments,
-        voice_of_cluster=mapping,
-        cluster_f0=f0s,
-        detected=detected,
-    )
+    f0s = {
+        c: f
+        for c, f in cluster_f0s(
+            audio16k, segments,
+            f0_fn=lambda a, sr: measure_f0(a, sr, device=_resolve_device(device)),
+        ).items()
+        if c in kept
+    }
+    return DiarizationAnalysis(segments=segments, cluster_f0=f0s, detected=detected)

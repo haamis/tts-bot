@@ -518,6 +518,13 @@ class TTSBot(commands.Bot):
     async def _diarize(self, source_path: str, voice_names: list[str], voice_f0, set_status):
         """Multi-voice speaker diarization via the configured engine.
 
+        Remote-first when RVC_GPU_SERVER_URL is set: the server returns
+        segments+f0s (analysis) and voice assignment stays local (needs the
+        thin client's pitch profiles). Deterministic data errors (400, e.g.
+        "no speech detected") propagate — the local engine would just raise
+        the same error on the same audio. Transport/5xx errors fall back to
+        the local engines below.
+
         RVC_DIARIZE_ENGINE: "auto" prefers pyannote when HF_TOKEN is set and
         falls back to the local engine on environment failures (missing
         token/import/model download); "local" and "pyannote" pin the choice
@@ -527,10 +534,37 @@ class TTSBot(commands.Bot):
         same error after a wasteful wav2vec2 load.
         """
         from ttsbot.media import diarize_pyannote
+        from ttsbot.media.diarize_remote import diarize_remote
 
         engine = self.env["RVC_DIARIZE_ENGINE"]
         threshold = self.env["RVC_DIARIZE_THRESHOLD"]
-        use_pyannote = engine == "pyannote" or (engine == "auto" and self.env["HF_TOKEN"])
+        resolved = (
+            "pyannote"
+            if (engine == "pyannote" or (engine == "auto" and self.env["HF_TOKEN"]))
+            else "local"
+        )
+        if self.env.get("RVC_GPU_SERVER_URL", ""):
+            try:
+                analysis = await diarize_remote(
+                    self.env["RVC_GPU_SERVER_URL"],
+                    self.env.get("RVC_GPU_SERVER_TOKEN", ""),
+                    self.env.get("RVC_GPU_SERVER_TIMEOUT", 900.0),
+                    source_path,
+                    resolved,
+                    len(voice_names),
+                    threshold,
+                )
+                return diarize.finalize_result(
+                    analysis, source_path, voice_names, voice_f0
+                )
+            except ValueError:
+                # Data errors ("no speech detected", "no sustained speech")
+                # are engine-independent — don't rerun the local engine on
+                # the same doomed audio.
+                raise
+            except Exception as e:
+                log.warning("remote diarization failed (%s); using local engine", e)
+        use_pyannote = resolved == "pyannote"
         if use_pyannote:
             try:
                 result = await asyncio.to_thread(
@@ -741,13 +775,17 @@ class TTSBot(commands.Bot):
 
     @staticmethod
     def _final_status(results) -> str:
-        """Done-status with visible cloud-TTS fallback notes (rate limits etc.)."""
-        fallback = [r for r in results if r.provider == "piper" and r.note]
-        if not fallback:
+        """Done-status with visible TTS fallback notes (rate limits etc.).
+
+        Any turn carrying a note skipped at least one tier (Kokoro -> cloud
+        -> Piper); the note names the first failure.
+        """
+        flagged = [r for r in results if r.note]
+        if not flagged:
             return "✅ Done."
-        rate_limited = any(r.note and "rate-limited" in r.note for r in fallback)
-        reason = "Cloud TTS rate-limited" if rate_limited else "Cloud TTS unavailable"
-        return f"✅ Done. ⚠️ {reason} — used local TTS for {len(fallback)} turn(s)"
+        rate_limited = any(r.note and "rate-limited" in r.note for r in flagged)
+        reason = "Cloud TTS rate-limited" if rate_limited else "TTS fallback"
+        return f"✅ Done. ⚠️ {reason} — {len(flagged)} turn(s) skipped a tier"
 
     def _rvc_slow_path_note(self) -> str:
         """Status suffix when RVC fell back to the local CPU worker.

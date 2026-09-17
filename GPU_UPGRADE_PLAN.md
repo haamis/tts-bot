@@ -117,6 +117,15 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   becomes an HTTP call returning segments+f0s; assignment/gap-absorption/
   slicing/rebuild stay local (pure numpy). Then do Stage 1's pending
   device threading ON THE DESKTOP (that's where the models run).
+  - [x] DONE 2026-09-18 (local engine): thin `analyze_media/finalize_result`
+    split (device-threaded: wav2vec2 + RMVPE take `device`); server mirrors
+    `ttsbot/media/{audio,diarize}.py` byte-identical and exposes
+    `POST /diarize` (RVC_DEVICE=cuda server-side); thin `_diarize` is
+    remote-first with local fallback (400 = data error, no retry).
+    Verified: remote analysis == local CPU analysis segment-for-segment
+    (24/24, f0s to 0.1Hz) on the 85s duo clip — 6.8s vs 42s.
+    Pyannote engine on the desktop deferred (server answers 501, thin
+    falls back to local pyannote — no silent quality change).
 - **Phase 2.5 (cloner pilot, GPU)**: Chatterbox-Turbo (350M, MIT) in its
   own desktop venv (`chatterbox-venv` recipe: torch 2.6.0+cpu wheel there
   becomes torch 2.6.0+cu121; PyPI 0.1.7 lacks newer model kwargs — pin
@@ -293,6 +302,11 @@ faster than here.
   cloud voice.** Kokoro becomes the local TTS tier; cloud drops to
   second in the chain: **Kokoro -> Piper** fallback with cloud flux
   available, order TBD at integration.
+  - [x] DONE 2026-09-18: chain is Kokoro -> cloud -> Piper (`auto`),
+    Kokoro -> Piper (`local`), cloud -> Kokoro -> Piper (`openrouter`);
+    `kokoro_voice:` per voice + `KOKORO_VOICE` default donor (af_heart —
+    RVC erases donor identity, one prosody donor serves all);
+    engine-native `speed_kokoro`; models self-download to `models/kokoro/`.
 
 ## Voice-cloner TTS (Chatterbox) — researched + Nano-tested 2026-09-10
 
