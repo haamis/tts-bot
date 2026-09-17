@@ -441,3 +441,131 @@ def test_shipped_generate_yaml_matches_defaults():
 
     prompts = load_prompts("config/generate.yaml")
     assert prompts == DEFAULT_PROMPTS
+
+
+# --- total-silence failures (timeout / connection drop) ------------------------
+
+
+def _timeout_error():
+    from openai import APITimeoutError
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    return APITimeoutError(request)
+
+
+def _connection_error():
+    from openai import APIConnectionError
+
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    return APIConnectionError(message="connection failed", request=request)
+
+
+async def test_generate_timeout_retries_then_propagates():
+    client = make_client([_timeout_error(), _timeout_error(), _timeout_error()])
+    with pytest.raises(Exception, match="timed out"):
+        await client.generate("topic", max_chars=1000)
+    assert len(client.client.chat.completions.calls) == 3
+
+
+async def test_generate_timeout_then_recovers():
+    client = make_client([_timeout_error(), "Recovered monologue."])
+    text = await client.generate("topic", max_chars=1000)
+    assert text == "Recovered monologue."
+    assert len(client.client.chat.completions.calls) == 2
+
+
+async def test_generate_connection_error_retries():
+    client = make_client([_connection_error(), _connection_error(), _connection_error()])
+    with pytest.raises(Exception, match="connection failed"):
+        await client.generate("topic", max_chars=1000)
+    assert len(client.client.chat.completions.calls) == 3
+
+
+# --- bot-level: every failure becomes a status message, never a traceback ----
+
+
+def _gen_ns(llm):
+    from types import SimpleNamespace
+
+    import ttsbot.bot as bot_mod
+
+    return SimpleNamespace(
+        llm=llm,
+        config=SimpleNamespace(generate_prompt_suffix="Stay short.", max_chars=500),
+        _status_editor=bot_mod.TTSBot._status_editor,
+    )
+
+
+class _FailLLM:
+    model = "openrouter/free"
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def generate(self, prompt, max_chars):
+        raise self._exc
+
+    async def generate_dialogue(self, prompt, max_chars, voices):
+        raise self._exc
+
+
+class _Status:
+    def __init__(self):
+        self.contents = []
+
+    async def edit(self, content):
+        self.contents.append(content)
+
+
+async def _run_generate(ns, monkeypatch, exc_or_llm):
+    import ttsbot.bot as bot_mod
+    from types import SimpleNamespace
+
+    async def _fake_voice_channel(ctx, bot):
+        return SimpleNamespace(id=9)
+
+    monkeypatch.setattr(bot_mod, "ensure_voice_channel", _fake_voice_channel)
+    llm = exc_or_llm if exc_or_llm is None else _FailLLM(exc_or_llm)
+    ns.llm = llm
+    status = _Status()
+    await bot_mod.TTSBot._process_generate(
+        ns,
+        SimpleNamespace(id=1),
+        SimpleNamespace(id=2),
+        SimpleNamespace(id=3),
+        ["snake"],
+        "a prompt",
+        status=status,
+    )
+    return status.contents
+
+
+async def test_process_generate_llm_error_is_status_not_raise(monkeypatch):
+    contents = await _run_generate(_gen_ns(None), monkeypatch, RuntimeError("boom"))
+    assert contents and contents[-1].startswith("❌ LLM request failed")
+
+
+async def test_process_generate_rate_limit_is_warning(monkeypatch):
+    from ttsbot.llm.openrouter import LlmRateLimited
+
+    contents = await _run_generate(_gen_ns(None), monkeypatch, LlmRateLimited("slow down"))
+    assert contents and contents[-1].startswith("⚠️")
+
+
+async def test_process_generate_text_too_long_is_status(monkeypatch):
+    from ttsbot.llm.openrouter import LlmTextTooLong
+
+    contents = await _run_generate(_gen_ns(None), monkeypatch, LlmTextTooLong("too big"))
+    assert contents and contents[-1].startswith("❌")
+
+
+async def test_process_generate_dialogue_error_is_status(monkeypatch):
+    from ttsbot.llm.openrouter import LlmDialogueError
+
+    contents = await _run_generate(_gen_ns(None), monkeypatch, LlmDialogueError("bad lines"))
+    assert contents and contents[-1].startswith("❌")
+
+
+async def test_process_generate_without_key_is_setup_hint(monkeypatch):
+    contents = await _run_generate(_gen_ns(None), monkeypatch, None)
+    assert contents and "OPENROUTER_API_KEY" in contents[-1]
