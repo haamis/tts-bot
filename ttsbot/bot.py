@@ -829,6 +829,8 @@ async def main():
     apply_log_level(env["LOG_LEVEL"])
 
     config = Config.load(PROJECT_ROOT / "config" / "voices.yaml")
+    # Limits live in .env, not voices.yaml (see Config.load note).
+    config.max_chars = env["MAX_CHARS"]
 
     if env["BOT_DRY_RUN"]:
         log.info("Running in DRY RUN mode - testing pipeline without Discord connection")

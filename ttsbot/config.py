@@ -71,17 +71,17 @@ class Config:
     def __init__(
         self,
         default_tts: str,
-        max_chars: int,
-        ffmpeg_path: str,
-        rvc_root: str,
-        voices: dict[str, VoiceConfig],
+        max_chars: int = 500,
+        ffmpeg_path: str = "ffmpeg",
+        rvc_root: str = "rvc_infer",
+        voices: dict[str, VoiceConfig] | None = None,
         generate_prompt_suffix: str = DEFAULT_GENERATE_PROMPT_SUFFIX,
     ):
         self.default_tts = default_tts
         self.max_chars = max_chars
         self.ffmpeg_path = ffmpeg_path
         self.rvc_root = rvc_root
-        self.voices = voices
+        self.voices = voices or {}
         self.generate_prompt_suffix = generate_prompt_suffix
 
     @classmethod
@@ -93,9 +93,11 @@ class Config:
         for name, vdata in data.get("voices", {}).items():
             voices[name] = VoiceConfig.from_dict(name, vdata)
 
+        # NOTE: voices.yaml holds voice config only. All limits (MAX_CHARS,
+        # MAX_MEDIA_SECONDS, ...) live in .env and are applied by the caller
+        # (see bot.py); a stale `max_chars:` key here is ignored.
         return cls(
             default_tts=data.get("default_tts", "en_US-lessac-medium"),
-            max_chars=data.get("max_chars", 500),
             ffmpeg_path=data.get("ffmpeg_path", "ffmpeg"),
             rvc_root=data.get("rvc_root", "rvc_infer"),
             voices=voices,
@@ -113,6 +115,9 @@ def load_env() -> dict:
     return {
         "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN", ""),
         "COMMAND_PREFIX": os.getenv("COMMAND_PREFIX", "!"),
+        # Character cap for !speak/!generate text (voices.yaml holds voice
+        # config only; all limits live here in .env).
+        "MAX_CHARS": int(os.getenv("MAX_CHARS", "500")),
         "GUILD_IDS": [
             int(x.strip()) for x in os.getenv("GUILD_IDS", "").split(",") if x.strip()
         ],

@@ -88,7 +88,6 @@ sudo apt update && sudo apt install -y ffmpeg libsodium-dev
 7. **Configure voices** in `config/voices.yaml`:
    ```yaml
    default_tts: en_US-lessac-medium
-   max_chars: 500
    ffmpeg_path: ffmpeg
    rvc_root: rvc_infer
    voices:
@@ -324,7 +323,7 @@ remote diarization).
 - Voice tag applies until the next `%tag` or end of string
 - Voice names must match keys in `config/voices.yaml`
 - Text is trimmed per turn
-- Maximum 1000 characters total (configurable via `max_chars` in `config/voices.yaml`)
+- Maximum 1000 characters total (configurable via `MAX_CHARS` in `.env`)
 
 ## Project Structure
 
@@ -394,7 +393,7 @@ Note: this must be the ContentVec model from `lj1995/VoiceConversionWebUI`, **no
 
 ### Slow inference on CPU
 - `f0_method: pm` is faster than `rmvpe` (slightly less accurate)
-- Reduce `max_chars` in config
+- Reduce `MAX_CHARS` in `.env`
 - Consider smaller RVC models (40k steps or less)
 
 ## License
