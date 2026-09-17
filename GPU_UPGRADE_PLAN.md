@@ -439,8 +439,13 @@ Boksi:
 5. [x] Bot with `RVC_GPU_SERVER_URL` set: single-voice `!rvc` and multi-voice
    `!rvc a,b <clip>` timing sanity — DONE live: user-run `!rvc` converts
    remotely (GPU bursts on ifrit), diarization remote for the local engine.
-6. [ ] pyannote on GPU (`RVC_DEVICE=auto` server-side): expect ~10x CPU time,
-   i.e. seconds not minutes — IN PROGRESS (installing on ifrit).
+6. [x] pyannote on GPU (`RVC_DEVICE=auto` server-side) — DONE 2026-09-18:
+   85s duo clip in ~16s cold / ~7s warm (vs ~230-260s boksi CPU, ~15x),
+   38 segments at the same granularity as the listened A/B, f0s 223/93Hz
+   matching the known voices. Thin `auto` now resolves pyannote remotely
+   with local fallback; stale voice profiles correctly yield appearance
+   order + a re-profile hint (profiles regenerated after the pm->rmvpe
+   flip: snake 111, trump 145, billy 164, otacon 143, colonel 142).
 7. [x] Fallback drill: stop the server, run a multi-voice `!rvc` -> bot degrades
    to local CPU worker with a status note, then recovers when the server
    returns — DONE at transport level: server down -> `test_pipeline.py`
