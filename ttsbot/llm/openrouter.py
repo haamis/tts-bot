@@ -139,7 +139,8 @@ class OpenRouterClient:
 
     async def generate(self, scenario: str, max_chars: int) -> str:
         """Single-voice monologue."""
-        return await self._request(scenario, max_chars, self._system_prompt(max_chars))
+        text = await self._request(scenario, max_chars, self._system_prompt(max_chars))
+        return _strip_asterisks(text)
 
     async def generate_dialogue(
         self, scenario: str, max_chars: int, voices: list[str]
@@ -148,7 +149,7 @@ class OpenRouterClient:
         text = await self._request(
             scenario, max_chars, self._dialogue_system_prompt(voices, max_chars)
         )
-        return parse_llm_dialogue(text, voices)
+        return parse_llm_dialogue(_strip_asterisks(text), voices)
 
     async def _request(self, scenario: str, max_chars: int, system_prompt: str) -> str:
         messages = [
@@ -296,6 +297,16 @@ class OpenRouterClient:
 # (space optional) or `name - text` / `name — text` (dashes need surrounding
 # spaces so hyphenated words never split into a new turn)
 _TURN_LINE_TAIL = r"[*_>\s]*(?::[*_>\s]*|\s+[-\u2013\u2014]\s+)(?P<text>.+)$"
+
+
+def _strip_asterisks(text: str) -> str:
+    """Drop `*` emphasis markers models emit despite the system prompt.
+
+    TTS reads them aloud (or pauses oddly) while humans barely notice them
+    in the Discord reply — and the reply shows the same text, so stripping
+    keeps what you hear identical to what you read.
+    """
+    return text.replace("*", "")
 
 
 def parse_llm_dialogue(text: str, voices: list[str]) -> list[Turn]:

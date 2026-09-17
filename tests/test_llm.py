@@ -569,3 +569,17 @@ async def test_process_generate_dialogue_error_is_status(monkeypatch):
 async def test_process_generate_without_key_is_setup_hint(monkeypatch):
     contents = await _run_generate(_gen_ns(None), monkeypatch, None)
     assert contents and "OPENROUTER_API_KEY" in contents[-1]
+
+
+async def test_generate_strips_asterisks():
+    client = make_client(["The *dragon* hoard **gleams** brightly."])
+    text = await client.generate("topic", max_chars=1000)
+    assert text == "The dragon hoard gleams brightly."
+    assert "*" not in text
+
+
+async def test_generate_dialogue_strips_asterisks():
+    client = make_client(["trump: This is *tremendous*, believe me\nsnake: *Kept* you waiting, huh?"])
+    turns = await client.generate_dialogue("argue", max_chars=1000, voices=["trump", "snake"])
+    assert turns[0].text == "This is tremendous, believe me"
+    assert turns[1].text == "Kept you waiting, huh?"
