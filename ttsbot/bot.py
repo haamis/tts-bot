@@ -21,6 +21,7 @@ from ttsbot.llm.openrouter import (
     LlmTextTooLong,
     LlmRateLimited,
     LlmDialogueError,
+    load_prompts,
 )
 from ttsbot.audio.player import AudioPlayer, ensure_voice_channel
 
@@ -45,7 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TTSBot(commands.Bot):
-    def __init__(self, config: Config, env: dict):
+    def __init__(self, config: Config, env: dict, prompts: dict | None = None):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.voice_states = True
@@ -78,7 +79,7 @@ class TTSBot(commands.Bot):
         )
         self.ytdlp = YtdlpRunner(max_duration=env["MAX_MEDIA_SECONDS"])
         self.llm = (
-            OpenRouterClient(env["OPENROUTER_API_KEY"], env["OPENROUTER_MODEL"])
+            OpenRouterClient(env["OPENROUTER_API_KEY"], env["OPENROUTER_MODEL"], prompts=prompts)
             if env["OPENROUTER_API_KEY"]
             else None
         )
@@ -908,7 +909,8 @@ async def main():
     if not env["DISCORD_TOKEN"]:
         raise RuntimeError("DISCORD_TOKEN not set in .env")
 
-    bot = TTSBot(config, env)
+    prompts = load_prompts(PROJECT_ROOT / "config" / "generate.yaml")
+    bot = TTSBot(config, env, prompts=prompts)
     async with bot:
         await bot.start(env["DISCORD_TOKEN"])
 

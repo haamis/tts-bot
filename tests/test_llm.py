@@ -8,6 +8,7 @@ from ttsbot.llm.openrouter import (
     LlmTextTooLong,
     LlmRateLimited,
     LlmDialogueError,
+    load_prompts,
     parse_llm_dialogue,
 )
 from ttsbot.parser import Turn
@@ -406,3 +407,37 @@ async def test_generate_dialogue_monologue_untouched():
     assert text == "A monologue."
     prompt = client.client.chat.completions.calls[0]["messages"][0]["content"]
     assert "monologues" in prompt
+
+# --- generate.yaml prompts -----------------------------------------------------
+
+
+def test_load_prompts_merges_over_defaults(tmp_path):
+    p = tmp_path / "generate.yaml"
+    p.write_text("monologue_system: 'Say stuff under {max_chars} chars.'\n")
+    prompts = load_prompts(str(p))
+    assert prompts["monologue_system"] == "Say stuff under {max_chars} chars."
+    # untouched keys fall back to defaults
+    assert "{num_speakers}" in prompts["dialogue_system"]
+    assert "{length}" in prompts["shorten_retry"]
+
+
+def test_load_prompts_missing_file_uses_defaults(tmp_path):
+    prompts = load_prompts(str(tmp_path / "nope.yaml"))
+    client = OpenRouterClient(api_key="k", prompts=prompts)
+    assert "monologues" in client._system_prompt(100)
+
+
+def test_custom_prompts_reach_the_request():
+    client = make_client(["A monologue."])
+    client.prompts["monologue_system"] = "Custom {max_chars}."
+    import asyncio
+    asyncio.run(client.generate("topic", max_chars=1000))
+    prompt = client.client.chat.completions.calls[0]["messages"][0]["content"]
+    assert prompt == "Custom 1000."
+
+
+def test_shipped_generate_yaml_matches_defaults():
+    from ttsbot.llm.openrouter import DEFAULT_PROMPTS
+
+    prompts = load_prompts("config/generate.yaml")
+    assert prompts == DEFAULT_PROMPTS

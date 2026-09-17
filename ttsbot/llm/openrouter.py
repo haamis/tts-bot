@@ -40,48 +40,84 @@ class LlmDialogueError(Exception):
     pass
 
 
+# Fallback !generate prompts when config/generate.yaml is missing or omits a
+# key (user overrides merge over these, so the yaml only needs the keys
+# being tweaked).
+DEFAULT_PROMPTS = {
+    "monologue_system": (
+        "You write short spoken monologues for a text-to-speech voice bot. "
+        "The text is read aloud exactly as written. "
+        "Write plain, speakable prose under {max_chars} characters. "
+        "Never use markdown: asterisks, underscores and backticks are read "
+        "aloud too, so never use them for emphasis — spell it out in words "
+        "instead. No stage directions, no lists, no emojis, no sound "
+        "effects, no headings. One voice speaking throughout. "
+        "Stay in character and be entertaining."
+    ),
+    "dialogue_system": (
+        "You write short spoken dialogues for a text-to-speech voice bot. "
+        "There are exactly {num_speakers} speakers: {speaker_names}. "
+        "Act out the user's prompt as a natural conversation between them, "
+        "taking turns speaking. "
+        "Output one turn per line. Every line must start with the "
+        "speaker's name followed by a colon, for example:\n"
+        "{example_lines}\n"
+        "Only the speakers above may speak — never invent other speakers "
+        "and never write narration or stage directions. The text is read "
+        "aloud exactly as written, so never use markdown: asterisks, "
+        "underscores and backticks are read aloud too, never use them for "
+        "emphasis — spell it out in words instead. No lists, no emojis, "
+        "no headings. Plain, speakable "
+        "prose, {max_chars} characters total or fewer. "
+        "Stay in character and be entertaining."
+    ),
+    "shorten_retry": (
+        "Too long ({length} characters). Rewrite it under {max_chars} characters."
+    ),
+}
+
+
+def load_prompts(path) -> dict:
+    """Load config/generate.yaml merged over DEFAULT_PROMPTS.
+
+    Missing file or bad content logs a warning and yields the defaults, so
+    !generate never breaks on a config typo (it just ignores it).
+    """
+    import yaml
+
+    prompts = dict(DEFAULT_PROMPTS)
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+        for key in DEFAULT_PROMPTS:
+            if isinstance(data.get(key), str) and data[key].strip():
+                prompts[key] = data[key]
+    except Exception as e:
+        log.warning("Could not load prompts from %s (%s); using defaults", path, e)
+    return prompts
+
+
 class OpenRouterClient:
-    def __init__(self, api_key: str, model: str = DEFAULT_MODEL, timeout: float = 120.0):
+    def __init__(self, api_key: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
+                 prompts: dict | None = None):
         self.model = model
+        self.prompts = {**DEFAULT_PROMPTS, **(prompts or {})}
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url="https://openrouter.ai/api/v1",
             timeout=timeout,
         )
 
-    @staticmethod
-    def _system_prompt(max_chars: int) -> str:
-        return (
-            "You write short spoken monologues for a text-to-speech voice bot. "
-            "The text is read aloud exactly as written. "
-            f"Write plain, speakable prose under {max_chars} characters. "
-            "Never use markdown: asterisks, underscores and backticks are read "
-            "aloud too, so never use them for emphasis — spell it out in words "
-            "instead. No stage directions, no lists, no emojis, no sound "
-            "effects, no headings. One voice speaking throughout. "
-            "Stay in character and be entertaining."
-        )
+    def _system_prompt(self, max_chars: int) -> str:
+        return self.prompts["monologue_system"].format(max_chars=max_chars)
 
-    @staticmethod
-    def _dialogue_system_prompt(voices: list[str], max_chars: int) -> str:
-        names = ", ".join(voices)
+    def _dialogue_system_prompt(self, voices: list[str], max_chars: int) -> str:
         example = "\n".join(f"{v}: what {v} says" for v in voices)
-        return (
-            "You write short spoken dialogues for a text-to-speech voice bot. "
-            f"There are exactly {len(voices)} speakers: {names}. "
-            "Act out the user's prompt as a natural conversation between them, "
-            "taking turns speaking. "
-            "Output one turn per line. Every line must start with the "
-            "speaker's name followed by a colon, for example:\n"
-            f"{example}\n"
-            "Only the speakers above may speak — never invent other speakers "
-            "and never write narration or stage directions. The text is read "
-            "aloud exactly as written, so never use markdown: asterisks, "
-            "underscores and backticks are read aloud too, never use them for "
-            "emphasis — spell it out in words instead. No lists, no emojis, "
-            "no headings. Plain, speakable "
-            f"prose, {max_chars} characters total or fewer. "
-            "Stay in character and be entertaining."
+        return self.prompts["dialogue_system"].format(
+            num_speakers=len(voices),
+            speaker_names=", ".join(voices),
+            example_lines=example,
+            max_chars=max_chars,
         )
 
     @staticmethod
@@ -225,7 +261,9 @@ class OpenRouterClient:
                 messages.append({"role": "assistant", "content": text})
                 messages.append({
                     "role": "user",
-                    "content": f"Too long ({len(text)} characters). Rewrite it under {max_chars} characters.",
+                    "content": self.prompts["shorten_retry"].format(
+                        length=len(text), max_chars=max_chars
+                    ),
                 })
             else:
                 # Already rewrote once and it is still too long — give up.
