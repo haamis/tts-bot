@@ -62,21 +62,34 @@ _FEATURE_LAYER = -1
 _MODEL_LOCK = threading.RLock()
 
 _RMVPE_MODEL = None
+_RMVPE_DEVICE = None
 
 
-def _get_rmvpe():
+def _resolve_device(device: str) -> str:
+    """Map "auto" onto cuda when available (server-side), else the literal."""
+    if device == "auto":
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    return device
+
+
+def _get_rmvpe(device: str = "cpu"):
     """Lazy-load the noise-robust RMVPE f0 model from the RVC submodule.
 
     Reuses the exact model the RVC worker already ships (assets/rmvpe),
     imported the same way the worker does it: namespace packages via
-    sys.path, no cwd change. Loaded once per process (init guarded — two
-    channels can reach here concurrently).
+    sys.path, no cwd change. Cached per device (thin client runs cpu, the
+    GPU server runs cuda — never both in one process, but safe if so).
     """
-    global _RMVPE_MODEL
-    if _RMVPE_MODEL is not None:
+    global _RMVPE_MODEL, _RMVPE_DEVICE
+    if _RMVPE_MODEL is not None and _RMVPE_DEVICE == device:
         return _RMVPE_MODEL
     with _MODEL_LOCK:
-        if _RMVPE_MODEL is not None:
+        if _RMVPE_MODEL is not None and _RMVPE_DEVICE == device:
             return _RMVPE_MODEL
         root = Path(
             os.environ.get("RVC_WORKER_ROOT")
@@ -89,11 +102,13 @@ def _get_rmvpe():
             sys.path.insert(0, str(root))
         from infer.rmvpe import RMVPE
 
-        _RMVPE_MODEL = RMVPE(str(model_path), is_half=False, device="cpu")
+        is_half = str(device).startswith("cuda")
+        _RMVPE_MODEL = RMVPE(str(model_path), is_half=is_half, device=device)
+        _RMVPE_DEVICE = device
         return _RMVPE_MODEL
 
 
-def measure_f0(audio: np.ndarray, sr: int) -> float | None:
+def measure_f0(audio: np.ndarray, sr: int, device: str = "cpu") -> float | None:
     """Median f0 (Hz) of voiced frames via RMVPE, or None if untrustworthy.
 
     RMVPE replaces pyin as the primary estimator: pyin drowns under music
@@ -106,7 +121,7 @@ def measure_f0(audio: np.ndarray, sr: int) -> float | None:
     if sr != SAMPLE_RATE:
         audio = resample(audio, sr, SAMPLE_RATE)
     try:
-        model = _get_rmvpe()
+        model = _get_rmvpe(device)
     except Exception as e:
         log.warning("RMVPE unavailable (%s); using pyin fallback", e)
         return _measure_f0_pyin(audio, SAMPLE_RATE)
@@ -575,14 +590,15 @@ def assign_voices(
 # --- embedding (model-backed, injectable in tests) -----------------------------
 
 
-def embed_windows_wav2vec2(windows: list[np.ndarray]) -> np.ndarray:
+def embed_windows_wav2vec2(windows: list[np.ndarray], device: str = "cpu") -> np.ndarray:
     """Mean-pooled wav2vec2 features per window; loads the model lazily.
 
     Windows are 16kHz float32, at most WINDOW_S long; shorter tail windows
     are right-padded and pooled over their valid frames only (via lengths),
     so a truncated window is not diluted by padding. Batched to bound
     activation memory on CPU. Serialized by _MODEL_LOCK: a concurrent
-    command waits instead of duplicating the model in RAM.
+    command waits instead of duplicating the model in RAM. `device` is
+    evaluated where this runs (thin client: cpu; GPU server: cuda).
     """
     import gc
 
@@ -594,13 +610,17 @@ def embed_windows_wav2vec2(windows: list[np.ndarray]) -> np.ndarray:
     for i, w in enumerate(windows):
         n = min(w.size, target)
         padded[i, :n] = w[:n]
-    lengths = torch.tensor([min(w.size, target) for w in windows], dtype=torch.long)
+    # lengths must live on the model's device: extract_features builds the
+    # attention bias from them (CPU lengths + CUDA model = device mismatch).
+    lengths = torch.tensor(
+        [min(w.size, target) for w in windows], dtype=torch.long, device=device
+    )
 
     with _MODEL_LOCK:
         bundle = torchaudio.pipelines.WAV2VEC2_BASE
-        model = bundle.get_model()
+        model = bundle.get_model().to(device)
         model.eval()
-        batch = torch.from_numpy(padded)
+        batch = torch.from_numpy(padded).to(device)
         with torch.inference_mode():
             feats_list, out_lengths = model.extract_features(batch, lengths=lengths)
         feats = feats_list[_FEATURE_LAYER]  # (batch, frames, 768)
@@ -623,18 +643,57 @@ def embed_windows_wav2vec2(windows: list[np.ndarray]) -> np.ndarray:
 # --- top level ------------------------------------------------------------------
 
 
+@dataclass
+class DiarizationAnalysis:
+    """Server-side half of diarization (Phase 2): timeline segments with per-
+    cluster pitch, before voice assignment. JSON-serializable — the GPU
+    server returns this; the thin client finalizes with its voice profiles.
+    """
+
+    segments: list[Segment]             # pre-gap-absorption timeline order
+    cluster_f0: dict[int, float | None]  # kept clusters only
+    detected: int
+
+
 def diarize_media(
     path: str,
     voices: list[str],
     voice_f0: dict[str, float | None],
     threshold: float,
-    embed_fn=embed_windows_wav2vec2,
-    f0_fn=measure_f0,
+    device: str = "cpu",
+    embed_fn=None,
+    f0_fn=None,
 ) -> DiarizationResult:
     """Full pipeline: file -> timeline segments with a voice assigned to each.
 
     Raises on any failure; callers own error reporting.
     """
+    analysis = analyze_media(path, len(voices), threshold, device=device,
+                             embed_fn=embed_fn, f0_fn=f0_fn)
+    return finalize_result(analysis, path, voices, voice_f0)
+
+
+def analyze_media(
+    path: str,
+    num_voices: int,
+    threshold: float,
+    device: str = "cpu",
+    embed_fn=None,
+    f0_fn=None,
+) -> DiarizationAnalysis:
+    """File -> segments + per-cluster pitch (no voice assignment).
+
+    The GPU-server half: everything here needs models/weights (wav2vec2,
+    RMVPE); everything after it (rank-matched assignment, gap absorption)
+    is pure math on data the thin client already has. `embed_fn`/`f0_fn`
+    inject fakes in tests (called as fn(wavs_or_audio, sr)-shaped like the
+    defaults); when omitted the real estimators run on `device`.
+    Raises on any failure; callers own error reporting.
+    """
+    device = _resolve_device(device)
+    embed = embed_fn or (lambda wavs: embed_windows_wav2vec2(wavs, device=device))
+    pitch = f0_fn or (lambda a, sr: measure_f0(a, sr, device=device))
+
     audio, sr = load_mono(path)
     if audio.size < sr * 2:
         raise ValueError("media is too short to diarize")
@@ -647,12 +706,12 @@ def diarize_media(
     log.info("Diarizing %d voiced windows (%.1fs media)", len(windows), audio16k.size / SAMPLE_RATE)
 
     wavs = [slice_audio(audio16k, SAMPLE_RATE, s, e) for s, e in windows]
-    embeddings = embed_fn(wavs)
-    k = len(voices)
+    embeddings = embed(wavs)
+    k = num_voices
     # Per-window pitch: trusted windows drive the clustering distance (it
     # separates pitch-different speakers the embeddings interleave, e.g.
     # male+female); untrusted windows get labels by temporal adjacency.
-    win_f0 = window_f0s(wavs, f0_fn=f0_fn)
+    win_f0 = window_f0s(wavs, f0_fn=pitch)
     labels, detected = cluster_and_propagate(windows, embeddings, win_f0, k, threshold)
 
     # Negligible clusters (a breath, a noise burst at the clip edge) are not
@@ -692,17 +751,32 @@ def diarize_media(
     if not segments:
         raise ValueError("speech runs were too short to segment")
 
-    f0s = cluster_f0s(audio16k, segments, f0_fn=f0_fn)
+    f0s = cluster_f0s(audio16k, segments, f0_fn=pitch)
     f0s = {c: f for c, f in f0s.items() if c in kept}
-    first_appearance = [
-        c for c in dict.fromkeys(s.cluster for s in segments) if c in kept
-    ]
+    return DiarizationAnalysis(segments=segments, cluster_f0=f0s, detected=detected)
+
+
+def finalize_result(
+    analysis: DiarizationAnalysis,
+    source_path: str,
+    voices: list[str],
+    voice_f0: dict[str, float | None],
+) -> DiarizationResult:
+    """Voice assignment + gap absorption for a server (or local) analysis.
+
+    Pure math + the source file the thin client already has: rank-matched
+    voice mapping from its pitch profiles, then audible-gap swallowing
+    (which runs AFTER pitch analysis so laughter never skews the medians).
+    """
+    f0s = analysis.cluster_f0
+    first_appearance = list(dict.fromkeys(s.cluster for s in analysis.segments))
     mapping = assign_voices(f0s, voices, voice_f0, first_appearance)
-    # Swallow audible gaps (laughter, reactions) into the preceding speaker
-    # AFTER pitch analysis — laughter would skew the f0 medians, and the
-    # conversion slices must cover the gaps so they get converted instead of
-    # leaking through as original audio.
-    segments = absorb_audible_gaps(audio16k, segments)
+    audio, sr = load_mono(source_path)
+    audio16k = resample(audio, sr, SAMPLE_RATE)
+    # Swallow audible gaps (laughter, reactions) into the preceding speaker.
+    # The conversion slices must cover the gaps so they get converted
+    # instead of leaking through as original audio.
+    segments = absorb_audible_gaps(audio16k, analysis.segments)
     log.info(
         "Voice assignment: %s",
         ", ".join(
@@ -714,7 +788,7 @@ def diarize_media(
         segments=segments,
         voice_of_cluster=mapping,
         cluster_f0=f0s,
-        detected=detected,
+        detected=analysis.detected,
     )
 
 
@@ -827,14 +901,17 @@ def voice_f0_map(profiles: dict[str, dict], voices: list) -> dict[str, float | N
 
 
 __all__ = [
+    "DiarizationAnalysis",
     "DiarizationResult",
     "Segment",
     "absorb_audible_gaps",
+    "analyze_media",
     "assign_voices",
     "cluster_embeddings",
     "cluster_f0s",
     "diarize_media",
     "embed_windows_wav2vec2",
+    "finalize_result",
     "load_profiles",
     "measure_f0",
     "merge_windows",
