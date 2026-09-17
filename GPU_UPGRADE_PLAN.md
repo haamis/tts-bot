@@ -4,8 +4,7 @@ Status markers: [x] done, [ ] pending GPU/install.
 
 ## Hardware plan
 
-- **Topology change**: the current machine is a boksi with no GPU
-  slot. The GPU (2060 6GB or 3060ti 8GB) goes into a desktop machine; the
+- **Topology change**: boksi has no GPU slot. The GPU (2060 6GB or 3060ti 8GB) goes into a desktop machine; the
   Discord-facing bot keeps running here and calls the desktop over the
   LAN for everything that wants GPU. See "Two-machine split" below.
 - Both cards are auto-supported by rvc_infer (needs >=4GiB VRAM, SM >= 5.3;
