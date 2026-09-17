@@ -8,6 +8,40 @@ import yt_dlp
 log = logging.getLogger("ttsbot.media")
 
 
+class YtdlpAuthError(RuntimeError):
+    """Raised when a download needs a YouTube login / age verification.
+
+    The real fix is operator-side (valid cookies.txt), but callers should
+    catch this separately to show a clean user-facing message instead of
+    dumping yt-dlp's raw extractor error.
+    """
+
+
+# Substrings (lowercased) identifying login / age-gate / auth failures in
+# yt-dlp's error text. Kept to auth-gating signals only — format/payment /
+# network errors fall through to the generic download-failed path.
+_AUTH_MARKERS = (
+    "confirm your age",
+    "age-restricted",
+    "age restricted",
+    "cookies-from-browser",
+    "cookies for the authentication",
+    "pass cookies to yt-dlp",
+    "login required",
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "confirm you’re not a bot",
+    "private video",
+    "members-only content",
+)
+
+
+def is_auth_error(message: str) -> bool:
+    """True when yt-dlp's error text looks like a login/age-gate block."""
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _AUTH_MARKERS)
+
+
 class _Logger:
     """Route yt-dlp's internal logging into our logger at debug level."""
 
@@ -139,7 +173,13 @@ class YtdlpRunner:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
         except yt_dlp.utils.DownloadError as e:
-            raise RuntimeError(f"yt-dlp failed: {str(e)[-500:]}") from e
+            raw = str(e)
+            if is_auth_error(raw):
+                raise YtdlpAuthError(
+                    "This video needs a YouTube login / age verification "
+                    "and can't be downloaded right now."
+                ) from e
+            raise RuntimeError(f"yt-dlp failed: {raw[-500:]}") from e
 
         if not info:
             raise RuntimeError("yt-dlp returned no info")
