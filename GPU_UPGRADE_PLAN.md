@@ -465,6 +465,10 @@ basename-recursive under `RVC_MODEL_ROOT` (per-voice subdirs preserved).
 - CUDA OOM maps to HTTP 503 (transient), NOT 400: boksi degrades to the
   local slow path with a status note instead of hard-failing the command.
 - Linger enabled on ifrit (`Linger=yes`): the user unit starts at boot.
+- 2026-09-18 A/B: eager mode (`RVC_CUDA_GRAPH=0`) beats graphs on every
+  axis — 30s in 3.3s (vs 3.1s), 150s in 5.6s (vs 9.9s chunked+graphs),
+  300s in 10.8s, VRAM flat ~0.9GB across all runs (vs 1.5–7.7GB). Graphs
+  stay OFF; chunking stays as the length safety net.
 
 Still TODO: none on the split itself. Operational notes: the server runs as
 an ifrit `--user` systemd unit (`rvc-server.service`, auto-restarts on
