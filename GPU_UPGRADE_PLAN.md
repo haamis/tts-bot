@@ -450,6 +450,20 @@ Fixes found during bring-up (already in the code): `ffmpeg-python` was
 missing from the desktop stack (worker import failed); model resolution is
 basename-recursive under `RVC_MODEL_ROOT` (per-voice subdirs preserved).
 
+## VRAM notes (3060 Ti 8GB, learned 2026-09-17)
+
+- Idle worker holds ~0.6GB, but RVC's per-shape CUDA-graph captures
+  accumulate per session (seen: 4.8GB in graph pools, 7.7GB total while
+  idle) until ~200MB allocs OOM even on short inputs. `restart rvc-server`
+  (fresh worker) is the current relief valve.
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set (service +
+  start.sh) to cut fragmentation OOMs.
+- CUDA OOM maps to HTTP 503 (transient), NOT 400: boksi degrades to the
+  local slow path with a status note instead of hard-failing the command.
+- If graph-pool regrowth keeps forcing restarts, the next step is a
+  VRAM-triggered worker recycle (like the RSS one) or server-side
+  uniform chunking; watch `nvidia-smi` across sessions.
+
 Still TODO: none on the split itself. Operational notes: the server runs as
 an ifrit `--user` systemd unit (`rvc-server.service`, auto-restarts on
 failure); boot persistence needs `sudo loginctl enable-linger haama`
