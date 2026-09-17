@@ -156,7 +156,8 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   (segments+f0 back as JSON) -> slice locally -> grouped `/convert` calls
   -> rebuild locally -> playback.
 
-## Stage 1 — GPU enablement [ ] (pending GPU, now on the DESKTOP)
+## Stage 1 — GPU enablement [x] DONE 2026-09-18 (torch 2.4.1+cu121 on the
+3060 Ti, `/health` shows device=cuda:0, fp16)
 
 1. **torch/torchaudio CUDA wheel swap** (version-identical, keeps all pins):
    ```
@@ -174,14 +175,12 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
    makes it visible — surface it in `/health` and log at WARNING.
    - rvc_infer GPU rule: CUDA only if >=4GiB VRAM and SM>=5.3; SM 6.1 /
      GTX-16xx are forced fp32 — 2060 (SM 7.5) and 3060ti (SM 8.6) both fp16.
-3. **Diary engine device threading (desktop-side, pending)**:
-   - [x] `RVC_DEVICE=auto|cpu|cuda` env (auto = cuda if torch.cuda.is_available()).
-   - [x] pyannote engine moves the pipeline to `RVC_DEVICE` when set.
-   - [ ] `diarize.embed_windows_wav2vec2(windows)` and `diarize._get_rmvpe()`:
-     add `device` param (default resolve from RVC_DEVICE), `.to(device)`,
-     results already return via `.cpu()`. Currently CPU-only by omission.
-     NOTE: after Phase 2 these run on the desktop, so the threading lands
-     in the worker-server copy of the diarization code.
+3. **Diary engine device threading (desktop-side)**:
+    - [x] `RVC_DEVICE=auto|cpu|cuda` env (auto = cuda if torch.cuda.is_available()).
+    - [x] pyannote engine moves the pipeline to `RVC_DEVICE` when set.
+    - [x] DONE 2026-09-18: `embed_windows_wav2vec2` and `_get_rmvpe` take
+      `device` (per-device RMVPE cache); wav2vec2 model/batch move to device,
+      results return via `.cpu()` as before.
 4. **Concurrency (single GPU, one machine)**: worker (~2GB VRAM fp16) and
    diarization (~0.4-1GB / pyannote ~1GB) share the card on the desktop.
    They never overlap today (diarize BEFORE convert, serialized per
@@ -437,11 +436,11 @@ Desktop setup:
    — PASS, valid audio, **~11s for 2 turns (~5s/turn) vs ~41s local-CPU**.
 
 Boksi:
-5. [ ] Bot with `RVC_GPU_SERVER_URL` set: single-voice `!rvc` and multi-voice
-   `!rvc a,b <clip>` timing sanity (diarize + convert both remote) —
-   PENDING (needs live Discord run; transport proven by 4).
+5. [x] Bot with `RVC_GPU_SERVER_URL` set: single-voice `!rvc` and multi-voice
+   `!rvc a,b <clip>` timing sanity — DONE live: user-run `!rvc` converts
+   remotely (GPU bursts on ifrit), diarization remote for the local engine.
 6. [ ] pyannote on GPU (`RVC_DEVICE=auto` server-side): expect ~10x CPU time,
-   i.e. seconds not minutes — PENDING (Phase 2 `/diarize` not built yet).
+   i.e. seconds not minutes — IN PROGRESS (installing on ifrit).
 7. [x] Fallback drill: stop the server, run a multi-voice `!rvc` -> bot degrades
    to local CPU worker with a status note, then recovers when the server
    returns — DONE at transport level: server down -> `test_pipeline.py`
