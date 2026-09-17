@@ -306,6 +306,11 @@ faster than here.
     `kokoro_voice:` per voice + `KOKORO_VOICE` default donor (af_heart —
     RVC erases donor identity, one prosody donor serves all);
     engine-native `speed_kokoro`; models self-download to `models/kokoro/`.
+  - [x] DONE 2026-09-18: Kokoro tier runs on ifrit (`POST /tts`) when
+    TTS_PROVIDER=auto — 0.2s warm per turn (vs ~7s boksi CPU), VRAM flat.
+    Chain becomes remote-Kokoro -> local-Kokoro -> cloud -> Piper with
+    per-tier fallback notes. Server needs onnxruntime-gpu + the LD path to
+    torch's bundled cuDNN (no sudo install).
 
 ## Voice-cloner TTS (Chatterbox) — researched + Nano-tested 2026-09-10
 

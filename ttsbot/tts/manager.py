@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from ttsbot.tts.kokoro_remote import KokoroRemoteRunner
 from ttsbot.tts.kokoro_runner import KokoroRunner
 from ttsbot.tts.openrouter_tts import (
     DEFAULT_SAMPLE_RATE,
@@ -38,6 +39,7 @@ class TTSManager:
         piper: PiperRunner,
         cloud: OpenRouterTTSProvider | None = None,
         kokoro: KokoroRunner | None = None,
+        kokoro_remote: KokoroRemoteRunner | None = None,
         default_kokoro_voice: str | None = None,
         cloud_first: bool = False,
         cooldown: float = 300.0,
@@ -46,6 +48,7 @@ class TTSManager:
         self.piper = piper
         self.cloud = cloud
         self.kokoro = kokoro
+        self.kokoro_remote = kokoro_remote
         self.default_kokoro_voice = default_kokoro_voice
         self.cloud_first = cloud_first
         self.cooldown = cooldown
@@ -59,9 +62,9 @@ class TTSManager:
         output_path = str(output_path)
         note = None
 
-        tiers = [self._try_kokoro, self._try_cloud]
+        tiers = [self._try_remote_kokoro, self._try_kokoro, self._try_cloud]
         if self.cloud_first:
-            tiers.reverse()
+            tiers = [self._try_cloud, self._try_remote_kokoro, self._try_kokoro]
         for tier in tiers:
             result, note = await tier(text, output_path, voice_cfg, note)
             if result is not None:
@@ -71,6 +74,21 @@ class TTSManager:
         await ensure_piper_voice(voice_cfg.tts)
         path = await self.piper.synthesize(voice_cfg.tts, text, output_path, speed=voice_cfg.speed_local)
         return TTSResult(path=path, provider="piper", note=note)
+
+    async def _try_remote_kokoro(self, text, output_path, voice_cfg, note):
+        """(TTSResult | None, note): GPU donor prosody, then local tiers."""
+        kokoro_voice = self._kokoro_voice_for(voice_cfg)
+        if self.kokoro_remote is None or not kokoro_voice:
+            return None, note
+        try:
+            path = await self.kokoro_remote.synthesize(
+                kokoro_voice, text, output_path, speed=voice_cfg.speed_kokoro
+            )
+            return TTSResult(path=path, provider="kokoro-remote", note=note), note
+        except Exception as e:
+            log.warning("Remote Kokoro TTS failed (%s); trying next tier", e)
+            err = f"remote kokoro TTS error: {e}"
+            return None, err if note is None else f"{note}; {err}"
 
     async def _try_kokoro(self, text, output_path, voice_cfg, note):
         """(TTSResult | None, note): None means 'skip to the next tier'."""
@@ -136,9 +154,10 @@ class TTSManager:
 def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
     """Construct a TTSManager from the load_env() dict.
 
-    TTS_PROVIDER: "auto" (Kokoro -> cloud when a key is present -> Piper),
-    "local" (Kokoro -> Piper, no cloud), or "openrouter" (cloud first, then
-    Kokoro -> Piper; warns if the key is missing). KOKORO_VOICE is the donor
+    TTS_PROVIDER: "auto" (remote Kokoro on the GPU server when configured,
+    else local Kokoro -> cloud when a key is present -> Piper), "local"
+    (Kokoro -> Piper, fully on-box), or "openrouter" (cloud first, then
+    remote/local Kokoro -> Piper; warns if the key is missing). KOKORO_VOICE is the donor
     voice for characters without their own `kokoro_voice:` (RVC erases donor
     identity, so one good prosody donor serves all voices); empty disables
     the Kokoro tier.
@@ -151,6 +170,17 @@ def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
     default_kokoro_voice = env.get("KOKORO_VOICE", "af_heart") or None
     if provider in ("auto", "local") or default_kokoro_voice:
         kokoro = KokoroRunner()
+
+    kokoro_remote = None
+    server_url = env.get("RVC_GPU_SERVER_URL", "")
+    if server_url and provider in ("auto", "openrouter"):
+        # ifrit takes the Kokoro tier on GPU (all commands, auto mode);
+        # "local" stays fully on-box.
+        kokoro_remote = KokoroRemoteRunner(
+            server_url=server_url,
+            server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
+            server_timeout=float(env.get("RVC_GPU_SERVER_TIMEOUT", 900)),
+        )
 
     cloud = None
     if provider != "local":
@@ -169,6 +199,7 @@ def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
         piper=piper,
         cloud=cloud,
         kokoro=kokoro,
+        kokoro_remote=kokoro_remote,
         default_kokoro_voice=default_kokoro_voice,
         cloud_first=(provider == "openrouter"),
         cooldown=float(env.get("CLOUD_TTS_COOLDOWN", 300.0)),
