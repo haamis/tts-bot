@@ -5,6 +5,8 @@ import soundfile as sf
 from pathlib import Path
 from typing import Optional
 
+from ttsbot.pipeline import RequestCancelled
+
 log = logging.getLogger("ttsbot.audio")
 
 
@@ -83,7 +85,33 @@ class AudioPlayer:
 
         self._idle_tasks[guild_id] = asyncio.create_task(_idle_disconnect())
 
-    async def play_file(self, channel: discord.VoiceChannel, file_path: str) -> None:
+    def stop_guild(self, guild: discord.Guild) -> bool:
+        """Cut in-progress playback in `guild` right now, if any.
+
+        The !cancel handler calls this for immediacy while the channel's
+        cancel event stops the active request at its next step boundary.
+        Returns True when something was playing.
+        """
+        try:
+            vc = guild.voice_client
+        except AttributeError:
+            return False
+        try:
+            if vc and vc.is_playing():
+                vc.stop()
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def play_file(
+        self,
+        channel: discord.VoiceChannel,
+        file_path: str,
+        cancel: asyncio.Event | None = None,
+    ) -> None:
+        if cancel is not None and cancel.is_set():
+            raise RequestCancelled("cancelled")
         path = Path(file_path)
         if not path.exists():
             raise RuntimeError(f"Audio file not found: {file_path}")
@@ -119,20 +147,45 @@ class AudioPlayer:
             duration = 0.0
         timeout = max(600.0, duration * 1.5 + 120.0)
 
+        done_task = asyncio.create_task(done.wait())
+        cancel_task = (
+            asyncio.create_task(cancel.wait()) if cancel is not None else None
+        )
+        tasks = {done_task} | ({cancel_task} if cancel_task else set())
         try:
-            await asyncio.wait_for(done.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            log.warning(f"Playback timed out for {file_path}")
-            if vc.is_playing():
-                vc.stop()
+            finished, _pending = await asyncio.wait(
+                tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if done_task in finished:
+            # Normal completion wins even if cancel fired simultaneously.
+            return
+        if cancel_task is not None and cancel_task in finished:
+            try:
+                if vc.is_playing():
+                    vc.stop()
+            except Exception:
+                pass
+            raise RequestCancelled("cancelled")
+        log.warning(f"Playback timed out for {file_path}")
+        if vc.is_playing():
+            vc.stop()
 
     async def play_sequence(
         self,
         channel: discord.VoiceChannel,
         file_paths: list[str],
+        cancel: asyncio.Event | None = None,
     ) -> None:
         try:
             for file_path in file_paths:
+                if cancel is not None and cancel.is_set():
+                    raise RequestCancelled("cancelled")
                 # Abort (and leave) if everyone walked out mid-request —
                 # also covers the bot being externally disconnected.
                 if self.channel_is_empty(channel):
@@ -143,7 +196,7 @@ class AudioPlayer:
                     )
                     await self.disconnect_guild(channel.guild)
                     return
-                await self.play_file(channel, file_path)
+                await self.play_file(channel, file_path, cancel=cancel)
         finally:
             # Arm the idle timer even if playback aborted with an error;
             # a no-op once the bot has already left the channel.

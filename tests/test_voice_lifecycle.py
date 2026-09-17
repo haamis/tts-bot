@@ -214,7 +214,7 @@ async def test_play_sequence_plays_and_arms_idle_timer():
     guild, channel, vc = make_world([HUMAN])
     played = []
 
-    async def fake_play(ch, path):
+    async def fake_play(ch, path, cancel=None):
         played.append(path)
 
     player.play_file = fake_play
@@ -232,7 +232,7 @@ async def test_play_sequence_arms_idle_timer_even_after_error():
     player = AudioPlayer(idle_timeout=3600)
     guild, channel, vc = make_world([HUMAN])
 
-    async def fake_play(ch, path):
+    async def fake_play(ch, path, cancel=None):
         raise RuntimeError("boom")
 
     player.play_file = fake_play
