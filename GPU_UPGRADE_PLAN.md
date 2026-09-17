@@ -450,5 +450,9 @@ Fixes found during bring-up (already in the code): `ffmpeg-python` was
 missing from the desktop stack (worker import failed); model resolution is
 basename-recursive under `RVC_MODEL_ROOT` (per-voice subdirs preserved).
 
-Still TODO: `RVC_GPU_SERVER_TOKEN` + server persistence (currently manual
-nohup).
+Still TODO: none on the split itself. Operational notes: the server runs as
+an ifrit `--user` systemd unit (`rvc-server.service`, auto-restarts on
+failure); boot persistence needs `sudo loginctl enable-linger haama`
+(Linger=no as of 2026-09-18 — without it the unit starts at first login,
+not at boot). Bearer token is set (`RVC_GPU_SERVER_TOKEN` in the server
+env file + thin `.env`).
