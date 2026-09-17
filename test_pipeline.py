@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify TTS + RVC pipeline output is valid audio (not silent/garbage)."""
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -33,6 +34,10 @@ async def main():
         rvc=RvcRunner(
             infer_script="infer/cli.py",
             rvc_root=config.rvc_root,
+            # Real-LAN smoke on GPU day: RVC_GPU_SERVER_URL=http://gpu:8001
+            # exercises the remote path end to end (Piper->upload->GPU RVC).
+            server_url=os.getenv("RVC_GPU_SERVER_URL", ""),
+            server_token=os.getenv("RVC_GPU_SERVER_TOKEN", ""),
         ),
     )
 

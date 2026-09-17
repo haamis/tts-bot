@@ -11,10 +11,10 @@ from discord import app_commands
 
 from ttsbot.config import Config, load_env
 from ttsbot.parser import Turn, parse_dialogue, ParseError
-from ttsbot.pipeline import Pipeline
+from ttsbot.pipeline import Pipeline, RequestCancelled
 from ttsbot.tts.manager import build_tts_manager
 from ttsbot.rvc.runner import RvcRunner
-from ttsbot.media.ytdlp_runner import YtdlpRunner
+from ttsbot.media.ytdlp_runner import YtdlpRunner, YtdlpAuthError
 from ttsbot.media import diarize
 from ttsbot.llm.openrouter import (
     OpenRouterClient,
@@ -67,6 +67,9 @@ class TTSBot(commands.Bot):
                 infer_script="infer/cli.py",
                 rvc_root=str(rvc_root),
                 use_worker=env["RVC_WORKER"],
+                server_url=env["RVC_GPU_SERVER_URL"],
+                server_token=env["RVC_GPU_SERVER_TOKEN"],
+                server_timeout=env["RVC_GPU_SERVER_TIMEOUT"],
             ),
         )
         self.player = AudioPlayer(
@@ -85,6 +88,7 @@ class TTSBot(commands.Bot):
         self.tree.add_command(self.speak_slash)
         self.tree.add_command(self.rvc_slash)
         self.tree.add_command(self.generate_slash)
+        self.tree.add_command(self.cancel_slash)
         self.tree.add_command(self.voices_slash)
         if self.env["GUILD_IDS"]:
             for guild_id in self.env["GUILD_IDS"]:
@@ -120,6 +124,9 @@ class TTSBot(commands.Bot):
             return
         elif message.content == f"{prefix}generate" or message.content.startswith(f"{prefix}generate "):
             await self._handle_generate_prefix(message)
+            return
+        elif message.content == f"{prefix}cancel" or message.content.startswith(f"{prefix}cancel "):
+            await self._handle_cancel_prefix(message)
             return
         elif message.content == f"{prefix}voices":
             await self._handle_voices_prefix(message)
@@ -206,6 +213,44 @@ class TTSBot(commands.Bot):
         status = await message.reply("⏳ Asking the LLM...")
         await self._process_generate(message.channel, message.author, message.guild, voices, prompt, status=status)
 
+    async def _handle_cancel_prefix(self, message: discord.Message):
+        await message.reply(self._cancel_active(message.guild, message.author))
+
+    @staticmethod
+    def _cancel_target_channel(guild, author):
+        """Voice channel whose active request !cancel should stop.
+
+        Prefers the channel the bot is currently in (the thing actually
+        making noise); falls back to the author's channel, which covers a
+        request still generating before the bot has joined. None when
+        neither exists.
+        """
+        vc = getattr(guild, "voice_client", None) if guild is not None else None
+        bot_channel = getattr(vc, "channel", None)
+        if bot_channel is not None:
+            return bot_channel
+        voice = getattr(author, "voice", None)
+        return getattr(voice, "channel", None)
+
+    def _cancel_active(self, guild, author) -> str:
+        """Flag the active request to stop and cut playback immediately.
+
+        Returns the reply text. Only the active (lock-holding) request is
+        affected — queued requests keep their place and run next. Phases
+        before the channel lock is acquired (LLM/search/probe) are not
+        cancellable; retry once generation starts.
+        """
+        if guild is None:
+            return "❌ This command must be used in a server."
+        channel = self._cancel_target_channel(guild, author)
+        if channel is None:
+            return "❌ Nothing to skip — join a voice channel first."
+        cancelled = self.pipeline.request_cancel(guild.id, channel.id)
+        stopped = self.player.stop_guild(guild)
+        if cancelled or stopped:
+            return "⏭ Skipping the current request..."
+        return "❌ Nothing to skip — no request is running."
+
     def _resolve_voice_spec(self, spec: str) -> list[str] | None:
         """Parse 'a,b,c' into validated voice names (order kept, dupes dropped).
 
@@ -271,6 +316,12 @@ class TTSBot(commands.Bot):
     async def voices_slash(self, interaction: discord.Interaction):
         voices = "\n".join(f"• **{name}** (TTS: {v.tts})" for name, v in self.config.voices.items())
         await interaction.response.send_message(f"Available voices:\n{voices}", ephemeral=True)
+
+    @app_commands.command(name="cancel", description="Skip the current request and move to the next in queue")
+    async def cancel_slash(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        text = self._cancel_active(interaction.guild, interaction.user)
+        await interaction.followup.send(text)
 
     async def _voice_autocomplete(self, interaction: discord.Interaction, current: str):
         current = (current or "").lower()
@@ -376,13 +427,28 @@ class TTSBot(commands.Bot):
         async with self.pipeline.channel_lock(guild.id, voice_channel.id):
             if queued:
                 await set_status(f"⏳ Downloading audio{dur_note}...")
+            # Clear here (not in the canceller) so this holder never
+            # inherits a stale flag from an earlier request.
+            self.pipeline.clear_cancel(guild.id, voice_channel.id)
+            cancel = self.pipeline.cancel_event(guild.id, voice_channel.id)
             try:
                 try:
                     source_path = await self.ytdlp.download(url, workdir)
+                except YtdlpAuthError:
+                    log.warning("yt-dlp download blocked (login/age-gate): %s", url)
+                    await set_status(
+                        "❌ This video is age-restricted or needs a YouTube login, "
+                        "so I can't download it. Try a different video or an "
+                        "age-unrestricted upload."
+                    )
+                    return
                 except Exception as e:
                     log.exception("yt-dlp download failed")
                     await set_status(f"❌ Download failed: {e}")
                     return
+
+                if cancel.is_set():
+                    raise RequestCancelled("cancelled")
 
                 if self.env["BOT_DRY_RUN"]:
                     await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
@@ -391,11 +457,13 @@ class TTSBot(commands.Bot):
                 try:
                     diar_result = None
                     if len(voice_cfgs) == 1:
-                        await self._convert_single(source_path, voice_cfgs[0], workdir, dur_note, set_status)
+                        await self._convert_single(source_path, voice_cfgs[0], workdir, dur_note, set_status, cancel=cancel)
                     else:
                         diar_result = await self._convert_multivoice(
-                            source_path, voice_cfgs, workdir, set_status
+                            source_path, voice_cfgs, workdir, set_status, cancel=cancel
                         )
+                except RequestCancelled:
+                    raise
                 except Exception as e:
                     log.exception("RVC conversion failed")
                     await set_status(f"❌ Conversion failed: {e}")
@@ -409,20 +477,30 @@ class TTSBot(commands.Bot):
                         )
                     else:
                         await set_status(f"🔊 Playing **{voices[0]}** conversion...")
-                    await self.player.play_sequence(voice_channel, [str(workdir / "converted.wav")])
+                    await self.player.play_sequence(voice_channel, [str(workdir / "converted.wav")], cancel=cancel)
                     if diar_result is not None:
-                        await set_status(f"✅ Done. ({diarize.result_summary(diar_result)})")
+                        await set_status(
+                            f"✅ Done. ({diarize.result_summary(diar_result)})"
+                            f"{self._rvc_slow_path_note()}"
+                        )
                     else:
-                        await set_status("✅ Done.")
+                        await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
+                except RequestCancelled:
+                    raise
                 except Exception as e:
                     log.exception("RVC playback failed")
                     await set_status(f"❌ Error: {e}")
+            except RequestCancelled:
+                log.info("RVC request cancelled (guild %s)", guild.id)
+                await set_status("⏭ Skipped.")
             finally:
                 if not keep_files:
                     shutil.rmtree(workdir, ignore_errors=True)
 
-    async def _convert_single(self, source_path: str, voice_cfg, workdir, dur_note, set_status) -> None:
+    async def _convert_single(self, source_path: str, voice_cfg, workdir, dur_note, set_status, cancel: asyncio.Event | None = None) -> None:
         """Original single-voice path: whole media through one RVC model."""
+        if cancel is not None and cancel.is_set():
+            raise RequestCancelled("cancelled")
         await set_status(
             f"⏳ Converting to **{voice_cfg.name}**{dur_note} (this can take a while)..."
         )
@@ -482,7 +560,7 @@ class TTSBot(commands.Bot):
             threshold,
         )
 
-    async def _convert_multivoice(self, source_path: str, voices: list, workdir, set_status):
+    async def _convert_multivoice(self, source_path: str, voices: list, workdir, set_status, cancel: asyncio.Event | None = None):
         """Diarize media, convert each speech segment with its assigned
         voice, keep original audio in the gaps, reassemble one file.
         Returns the DiarizationResult for status reporting."""
@@ -490,6 +568,8 @@ class TTSBot(commands.Bot):
         voice_f0 = diarize.voice_f0_map(profiles, voices)
         await set_status("⏳ Detecting speakers...")
         result = await self._diarize(source_path, [c.name for c in voices], voice_f0, set_status)
+        if cancel is not None and cancel.is_set():
+            raise RequestCancelled("cancelled")
 
         notes = []
         used = set(result.voice_of_cluster.values())
@@ -527,6 +607,8 @@ class TTSBot(commands.Bot):
             key=lambda i: (names.index(result.voice_of_cluster[result.segments[i].cluster]), i),
         )
         for done, i in enumerate(order, start=1):
+            if cancel is not None and cancel.is_set():
+                raise RequestCancelled("cancelled")
             cfg = next(
                 c for c in voices
                 if c.name == result.voice_of_cluster[result.segments[i].cluster]
@@ -611,12 +693,21 @@ class TTSBot(commands.Bot):
         async with self.pipeline.channel_lock(guild.id, voice_channel.id):
             if queued:
                 await set_status("⏳ Generating audio...")
+            # Clear here (not in the canceller) so this holder never
+            # inherits a stale flag from an earlier request.
+            self.pipeline.clear_cancel(guild.id, voice_channel.id)
+            cancel = self.pipeline.cancel_event(guild.id, voice_channel.id)
             try:
                 results = await self.pipeline.process_turns(
                     turns=turns,
                     voices=self.config.voices,
                     dry_run=self.env["BOT_DRY_RUN"],
+                    cancel=cancel,
                 )
+            except RequestCancelled:
+                log.info("Speak/generate request cancelled (guild %s)", guild.id)
+                await set_status("⏭ Skipped.")
+                return
             except Exception as e:
                 log.exception("Generation failed")
                 await set_status(f"❌ Generation failed: {e}")
@@ -633,8 +724,11 @@ class TTSBot(commands.Bot):
                 # in the channel with connect/disconnect noise while working.
                 await self.player.connect(voice_channel)
                 await set_status(f"🔊 Playing {len(turns)} turn(s)...")
-                await self.player.play_sequence(voice_channel, output_files)
-                await set_status(self._final_status(results))
+                await self.player.play_sequence(voice_channel, output_files, cancel=cancel)
+                await set_status(self._final_status(results) + self._rvc_slow_path_note())
+            except RequestCancelled:
+                log.info("Speak/generate playback cancelled (guild %s)", guild.id)
+                await set_status("⏭ Skipped.")
             except Exception as e:
                 log.exception("Playback failed")
                 await set_status(f"❌ Error: {e}")
@@ -654,6 +748,20 @@ class TTSBot(commands.Bot):
         rate_limited = any(r.note and "rate-limited" in r.note for r in fallback)
         reason = "Cloud TTS rate-limited" if rate_limited else "Cloud TTS unavailable"
         return f"✅ Done. ⚠️ {reason} — used local TTS for {len(fallback)} turn(s)"
+
+    def _rvc_slow_path_note(self) -> str:
+        """Status suffix when RVC fell back to the local CPU worker.
+
+        Only meaningful with RVC_GPU_SERVER_URL set: last_via "worker" /
+        "subprocess" then means the remote convert failed and we degraded.
+        Without a server URL those are the normal transports (no note).
+        """
+        if self.env["RVC_GPU_SERVER_URL"] and self.pipeline.rvc.last_via in (
+            "worker",
+            "subprocess",
+        ):
+            return " ⚠️ GPU server unreachable — used local slow path"
+        return ""
 
     async def _process_generate(
         self,
@@ -735,6 +843,9 @@ async def main():
                 infer_script="infer/cli.py",
                 rvc_root=str(PROJECT_ROOT / config.rvc_root),
                 use_worker=env["RVC_WORKER"],
+                server_url=env.get("RVC_GPU_SERVER_URL", ""),
+                server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
+                server_timeout=env.get("RVC_GPU_SERVER_TIMEOUT", 900),
             ),
         )
 

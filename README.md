@@ -179,12 +179,14 @@ BOT_DRY_RUN=1
   - **Multiple voices** (`!rvc trump,snake <url>`): the media is diarized — speech is split into speaker segments via wav2vec2 embeddings + clustering — and each speaker is converted with its assigned voice. Speakers are matched to voices by pitch (higher-pitch voice ↔ higher-pitch speaker, using per-voice pitch profiles from `tools/analyze_voices.py`; unprofiled voices fall back to first-appearance order). Music/silence between segments stays original audio. The done status reports the assignment (e.g. `trump @ 156Hz, snake @ 471Hz`).
   - Run `python tools/analyze_voices.py` once (and after adding/changing voices) to build the pitch profiles; the done status warns about unprofiled voices.
 - `!generate <voice[,voice2,...]> <prompt>` — An LLM (OpenRouter) writes spoken text from your prompt, then it's played through the normal pipeline. One voice gives a monologue (e.g. `!generate trump a rant about tiny keyboards`); comma-separated voices give a multi-voice dialogue where the LLM takes turns (e.g. `!generate trump,snake arguing which is better, burger king or mcdonalds`)
+- `!cancel` — Skip the request currently being processed or playing and move on to the next one in queue (queued requests keep their place). Replies `Nothing to skip` when nothing is running.
 - `!voices` — List available voices
 
 ### Slash commands
 - `/speak dialogue:<text>` — Generate and play dialogue
 - `/rvc voice:<voice> url:<url or search terms>` — Same as `!rvc`, with voice autocompletion
 - `/generate voice:<voice> prompt:<prompt>` — Same as `!generate`
+- `/cancel` — Same as `!cancel`
 - `/voices` — List available voices
 
 Both `!speak` and `/speak` reply with a status message that is updated through
@@ -271,6 +273,29 @@ Optimizations and their tradeoffs:
    accuracy — switch per voice in `config/voices.yaml` if quality matters
    more than speed.
 3. **`is_half` has no effect on CPU** — inference runs in float32 either way.
+
+## GPU worker server (Phase 1)
+
+With a GPU desktop on the LAN, RVC conversion moves off the thin client:
+
+- **Desktop**: `python -m ttsbot.rvc.server` (needs `fastapi`, `uvicorn`,
+  `python-multipart` plus the RVC stack with the CUDA torch wheel).
+  Exposes `POST /convert` (audio + RVC params -> converted wav),
+  `GET /health` (status, `device`, loaded model). It owns the same
+  persistent `worker.py` subprocess, so model caching, single-job
+  serialization and memory hygiene behave exactly like the local worker.
+- **Thin client**: set `RVC_GPU_SERVER_URL=http://<desktop>:8001`
+  (+ optional `RVC_GPU_SERVER_TOKEN`). The bot uploads each turn/segment
+  and plays back the returned wav. Model paths are sent verbatim — mirror
+  the thin client's `rvc_models/` layout on the desktop, or point
+  `RVC_MODEL_ROOT` at a flat dir of `.pth`/`.index` files.
+- **Fallback**: 4xx from the server fails fast (deterministic, e.g. bad
+  model path); timeouts/5xx/connection errors degrade to the local CPU
+  worker with a "⚠️ GPU server unreachable — used local slow path" status
+  note. Empty URL = today's local behavior exactly.
+
+See `GPU_UPGRADE_PLAN.md` for the full two-machine split (Phase 2 adds
+remote diarization).
 
 ## Voice channel behavior
 

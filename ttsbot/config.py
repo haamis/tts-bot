@@ -152,5 +152,14 @@ def load_env() -> dict:
         # GPU_UPGRADE_PLAN.md Stage 1). The RVC worker picks its own device
         # (rvc_infer auto-detects + fp16) and ignores this.
         "RVC_DEVICE": os.getenv("RVC_DEVICE", "auto"),
+        # Remote GPU worker server (Phase 1, thin-client side). Empty = local
+        # CPU worker, today's behavior exactly. Set to the desktop's base URL
+        # (e.g. http://gpu-box:8001) to convert remotely with local fallback
+        # ("slow path") on transport/5xx failures. The models/weights live on
+        # the DESKTOP; RVC_WORKER/RVC_WORKER_MAX_RSS_MB/RVC_DEVICE are then
+        # evaluated server-side, not here.
+        "RVC_GPU_SERVER_URL": os.getenv("RVC_GPU_SERVER_URL", "").rstrip("/"),
+        "RVC_GPU_SERVER_TOKEN": os.getenv("RVC_GPU_SERVER_TOKEN", ""),
+        "RVC_GPU_SERVER_TIMEOUT": float(os.getenv("RVC_GPU_SERVER_TIMEOUT", "900")),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
     }

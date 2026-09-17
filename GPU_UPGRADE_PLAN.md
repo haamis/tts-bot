@@ -101,6 +101,18 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   CPU worker stays as fallback. Tests: contract tests with mocked HTTP
   (pytest stays network-free), real-LAN smoke via `test_pipeline.py`
   pointed at the server.
+  - [x] IMPLEMENTED 2026-09-17 (thin-client side + server code, no GPU
+    needed): `ttsbot/rvc/server.py` (`/health` with device/threads/loaded
+    model, `/convert` multipart -> wav, Bearer auth, protocol-version
+    header, single-job via the runner's `_worker_lock`, scratch cleanup);
+    `RvcRunner(server_url/token/timeout)` remote-first with 4xx fail-fast
+    and transport/5xx local-slow-path fallback (+ `last_via`, slow-path
+    status note in bot); config `RVC_GPU_SERVER_URL/TOKEN/TIMEOUT`;
+    `tests/test_rvc_remote.py` (20 tests, network-free);
+    `test_pipeline.py` honors `RVC_GPU_SERVER_URL` for the real-LAN smoke.
+    PENDING GPU DAY: desktop venv + torch cu121 swap, `nvidia-smi` check,
+    `/health` shows device=cuda, LAN smoke, fallback drill (validation
+    checklist items 1-7 below).
 - **Phase 2**: `/diarize` on the desktop; thin client's diarization
   becomes an HTTP call returning segments+f0s; assignment/gap-absorption/
   slicing/rebuild stay local (pure numpy). Then do Stage 1's pending
@@ -393,20 +405,53 @@ cloner (one clip set serves !speak and !rvc):
 
 ## Validation checklist (GPU arrival day)
 
+Measured 2026-09-17 on ifrit (RTX 3060 Ti 8GB, driver 595.91, torch
+2.4.1+cu121, repo at `~/rvc-gpu-server` — see "Sub-repo" below):
+
 Desktop setup:
-1. `nvidia-smi` (driver >= 531 for cu121).
-2. torch swap in the desktop venv, then
-   `python -c "import torch; print(torch.cuda.is_available())"`.
-3. Start worker server (`/health` shows device=cuda).
-4. `python test_pipeline.py` pointed at the server (e2e Piper->RVC on GPU).
+1. [x] `nvidia-smi` (driver >= 531 for cu121) — 595.91.07.
+2. [x] torch swap in the desktop venv, then
+   `python -c "import torch; print(torch.cuda.is_available())"` — True,
+   `cuda:0 NVIDIA GeForce RTX 3060 Ti`.
+3. [x] Start worker server (`/health` shows device=cuda) —
+   `{"status":"ok","device":"cuda:0","threads":8}`.
+4. [x] `python test_pipeline.py` pointed at the server (e2e Piper->RVC on GPU)
+   — PASS, valid audio, **~11s for 2 turns (~5s/turn) vs ~41s local-CPU**.
 
 Thin client:
-5. Bot with `RVC_GPU_SERVER_URL` set: single-voice `!rvc` and multi-voice
-   `!rvc a,b <clip>` timing sanity (diarize + convert both remote).
-6. pyannote on GPU (`RVC_DEVICE=auto` server-side): expect ~10x CPU time,
-   i.e. seconds not minutes.
-7. Fallback drill: stop the server, run a multi-voice `!rvc` -> bot degrades
+5. [ ] Bot with `RVC_GPU_SERVER_URL` set: single-voice `!rvc` and multi-voice
+   `!rvc a,b <clip>` timing sanity (diarize + convert both remote) —
+   PENDING (needs live Discord run; transport proven by 4).
+6. [ ] pyannote on GPU (`RVC_DEVICE=auto` server-side): expect ~10x CPU time,
+   i.e. seconds not minutes — PENDING (Phase 2 `/diarize` not built yet).
+7. [x] Fallback drill: stop the server, run a multi-voice `!rvc` -> bot degrades
    to local CPU worker with a status note, then recovers when the server
-   returns.
+   returns — DONE at transport level: server down -> `test_pipeline.py`
+   PASS via local worker in 41s; server back -> `/health` ok.
 8. Local-fallback venv stays intact on the thin client (decide Phase 3
    slimming only after a few weeks of remote-only stability).
+
+## Sub-repo: rvc-gpu-server (scaffolded 2026-09-17, pending GitHub + submodule)
+
+Per user decision the desktop code lives in its own repo, pinned as a git
+submodule (like `rvc_infer`). Staged at `~/rvc-gpu-server` on ifrit AND
+`/home/haama/rvc-gpu-server` on the thin client (identical content; the
+thin copy is the staging source until git exists):
+
+- `server.py` — FastAPI shell, self-contained (no ttsbot imports).
+- `worker_owner.py` — worker subprocess owner, stdlib-only (5 tests).
+- `worker.py` — VERBATIM copy of `ttsbot/rvc/worker.py`; re-copy, never edit.
+- `tools/rvc_models.py` — voice-model downloader (prints thin-config block;
+  `--config` only when the thin checkout is mounted).
+- `rvc_infer/` + `rvc_models/` rsynced from thin (gitignored, not versioned).
+- `tests/test_server.py` (13 tests) + `pytest.ini` + `requirements-server.txt`.
+
+Fixes found during bring-up (already in the code): `ffmpeg-python` was
+missing from the desktop stack (worker import failed); model resolution is
+basename-recursive under `RVC_MODEL_ROOT` (per-voice subdirs preserved).
+
+Still TODO: user creates the GitHub repo -> `git init + push` from the
+staging copy -> `git submodule add <url> gpu-server` in TTS-bot -> delete
+thin `ttsbot/rvc/server.py` (server tests move with it; client contract
+tests in `tests/test_rvc_remote.py` stay) -> `RVC_GPU_SERVER_TOKEN` +
+server persistence (systemd user unit or similar; currently manual nohup).
