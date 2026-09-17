@@ -4,7 +4,7 @@ Status markers: [x] done, [ ] pending GPU/install.
 
 ## Hardware plan
 
-- **Topology change**: the current machine is a thin client with no GPU
+- **Topology change**: the current machine is a boksi with no GPU
   slot. The GPU (2060 6GB or 3060ti 8GB) goes into a desktop machine; the
   Discord-facing bot keeps running here and calls the desktop over the
   LAN for everything that wants GPU. See "Two-machine split" below.
@@ -14,7 +14,7 @@ Status markers: [x] done, [ ] pending GPU/install.
 
 ## Two-machine split (the architecture)
 
-**Thin client = orchestrator + Discord face.** Desktop = "GPU worker
+**Boksi = orchestrator + Discord face.** Desktop = "GPU worker
 server": FastAPI (uvicorn) exposing two compute endpoints. Bot process
 stays async and uses aiohttp (already a dependency) as the client.
 
@@ -22,15 +22,15 @@ stays async and uses aiohttp (already a dependency) as the client.
 
 | Concern | Runs where | Why |
 |---|---|---|
-| Discord gateway, commands, status messages | thin client | latency + bot identity |
-| `!generate` LLM, cloud TTS (OpenRouter HTTP) | thin client | pure network calls |
-| yt-dlp probe/download/search + duration caps | thin client | see decision below |
-| Piper TTS (+ `piper_voices/`) | thin client | ~1s/turn on CPU; keeps TTS provider/fallback logic in one place |
-| Audio slicing (`_slice_segments`), timeline rebuild, gap absorption | thin client | pure numpy on audio it already has locally |
-| Voice pitch profiles (`voice_pitch.json`), `assign_voices` rank matching | thin client | profiles are bot config; assignment is pure math |
-| Playback (FFmpegPCMAudio -> voice conn) | thin client | must live where the Discord voice connection is |
+| Discord gateway, commands, status messages | boksi | latency + bot identity |
+| `!generate` LLM, cloud TTS (OpenRouter HTTP) | boksi | pure network calls |
+| yt-dlp probe/download/search + duration caps | boksi | see decision below |
+| Piper TTS (+ `piper_voices/`) | boksi | ~1s/turn on CPU; keeps TTS provider/fallback logic in one place |
+| Audio slicing (`_slice_segments`), timeline rebuild, gap absorption | boksi | pure numpy on audio it already has locally |
+| Voice pitch profiles (`voice_pitch.json`), `assign_voices` rank matching | boksi | profiles are bot config; assignment is pure math |
+| Playback (FFmpegPCMAudio -> voice conn) | boksi | must live where the Discord voice connection is |
 | **RVC conversion** (worker, models, ContentVec/RMVPE weights) | **desktop** | the big GPU win |
-| **Diarization** (pyannote OR wav2vec2+RMVPE local engine) | **desktop** | GPU speedup + frees ~1.3GB pyannote / ~0.4GB wav2vec2 + 360MB weights from the thin client |
+| **Diarization** (pyannote OR wav2vec2+RMVPE local engine) | **desktop** | GPU speedup + frees ~1.3GB pyannote / ~0.4GB wav2vec2 + 360MB weights from the boksi |
 | RVC worker process, model cache, RSS recycle, malloc hygiene | **desktop** | existing worker.py semantics move wholesale |
 
 ### API sketch (desktop)
@@ -41,7 +41,7 @@ stays async and uses aiohttp (already a dependency) as the client.
   as today.
 - `POST /diarize` — multipart audio file + engine + params ->
   `{segments: [{start, end, cluster}], cluster_f0, detected, engine}`.
-  Voice assignment stays on the thin client (needs profiles/config).
+  Voice assignment stays on the boksi (needs profiles/config).
 - `GET /health` — device, loaded model, RSS, protocol version (the
   remote equivalent of the worker ready-handshake line).
 - Single-job-at-a-time: global asyncio lock server-side (mirrors
@@ -50,7 +50,7 @@ stays async and uses aiohttp (already a dependency) as the client.
   bind to LAN interface; no TLS needed on a home LAN (note if that ever
   changes). Simple protocol-version header.
 
-### The yt-dlp decision: stays on the thin client
+### The yt-dlp decision: stays on the boksi
 
 Upload the source wav to the desktop (~30MB for a 3-min cap; seconds on
 LAN), NOT `yt-dlp` on the desktop. Rationale:
@@ -59,10 +59,10 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
    doubles the maintenance and drifts.
 2. Caps, search fallback, URL self-healing live in the bot — one source of
    truth for "what the user asked for".
-3. The converted output has to come back to the thin client anyway
+3. The converted output has to come back to the boksi anyway
    (playback must be where the Discord voice connection is), so the only
    saving would be one ~30MB upload. Not worth the split-brain config.
-(Revisit only if the thin client's LAN link ever becomes the bottleneck.)
+(Revisit only if the boksi's LAN link ever becomes the bottleneck.)
 
 ### Failure semantics to preserve (the hard-won gotchas)
 
@@ -87,7 +87,7 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
 - `RVC_GPU_SERVER_TOKEN`
 - `RVC_DEVICE` — evaluated on the desktop (server side), not the client
 - `RVC_WORKER` / `RVC_WORKER_MAX_RSS_MB` etc. — desktop-side now
-- `RVC_DIARIZE_ENGINE` — desktop-side; thin client just calls `/diarize`
+- `RVC_DIARIZE_ENGINE` — desktop-side; boksi just calls `/diarize`
 
 ### Phases
 
@@ -101,7 +101,7 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   CPU worker stays as fallback. Tests: contract tests with mocked HTTP
   (pytest stays network-free), real-LAN smoke via `test_pipeline.py`
   pointed at the server.
-  - [x] IMPLEMENTED 2026-09-17 (thin-client side + server code, no GPU
+  - [x] IMPLEMENTED 2026-09-17 (boksi side + server code, no GPU
     needed): `rvc-gpu-server/server.py` (`/health` with device/threads/loaded
     model, `/convert` multipart -> wav, Bearer auth, protocol-version
     header, single-job lock, scratch cleanup);
@@ -113,18 +113,18 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
     PENDING GPU DAY: desktop venv + torch cu121 swap, `nvidia-smi` check,
     `/health` shows device=cuda, LAN smoke, fallback drill (validation
     checklist items 1-7 below).
-- **Phase 2**: `/diarize` on the desktop; thin client's diarization
+- **Phase 2**: `/diarize` on the desktop; boksi's diarization
   becomes an HTTP call returning segments+f0s; assignment/gap-absorption/
   slicing/rebuild stay local (pure numpy). Then do Stage 1's pending
   device threading ON THE DESKTOP (that's where the models run).
-  - [x] DONE 2026-09-18 (local engine): thin `analyze_media/finalize_result`
+  - [x] DONE 2026-09-18 (local engine): boksi `analyze_media/finalize_result`
     split (device-threaded: wav2vec2 + RMVPE take `device`); server mirrors
     `ttsbot/media/{audio,diarize}.py` byte-identical and exposes
-    `POST /diarize` (RVC_DEVICE=cuda server-side); thin `_diarize` is
+    `POST /diarize` (RVC_DEVICE=cuda server-side); boksi `_diarize` is
     remote-first with local fallback (400 = data error, no retry).
     Verified: remote analysis == local CPU analysis segment-for-segment
     (24/24, f0s to 0.1Hz) on the 85s duo clip — 6.8s vs 42s.
-    Pyannote engine on the desktop deferred (server answers 501, thin
+    Pyannote engine on the desktop deferred (server answers 501, boksi
     falls back to local pyannote — no silent quality change).
 - **Phase 2.5 (cloner pilot, GPU)**: Chatterbox-Turbo (350M, MIT) in its
   own desktop venv (`chatterbox-venv` recipe: torch 2.6.0+cpu wheel there
@@ -134,7 +134,7 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   energy-profile scan -> densest contiguous ~22s span, see
   `out/tts_compare/ref_snake_16k.wav`). A/B: Turbo vs Kokoro->RVC on the
   same sentences (Nano already ruled out: quality below the chain, 0.14-
-  0.26x realtime on the thin client). Paralinguistic tags demoed working
+  0.26x realtime on the boksi). Paralinguistic tags demoed working
   (`[chuckle]` in `8_nano_snake_chuckle.wav`). If Turbo wins, `!speak`
   migrates to reference clips + `/tts`; RVC stays for `!rvc`.
 - **Phase 2.6 (VC pilots, GPU)**: `!rvc` engine A/B — Chatterbox-VC
@@ -142,7 +142,7 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   2025 — pin a commit). RVC stays default; same reference clips.
 - **Phase 3 (optional slimming)**: once remote is the only path in
   practice, decide whether to drop pyannote/torchaudio/wav2vec2 deps from
-  the thin-client venv (slims the bot image; trades away the local-CPU
+  the boksi venv (slims the bot image; trades away the local-CPU
   fallback). Default: keep the fallback initially.
 - **Wake-on-LAN** for the desktop: optional nicety; bot pings WOL before a
   remote job when a magic-packet target is configured.
@@ -259,7 +259,7 @@ Question: does a "bigger, more capable" local TTS require the GPU machine?
   redundant here: RVC already handles identity, so the TTS donor only needs
   natural prosody (which is exactly Kokoro's strength).
 
-### Measured on the thin client (2400GE, 4C/8T)
+### Measured on the boksi (2400GE, 4C/8T)
 
 | | load | synthesis |
 |---|---|---|
@@ -274,7 +274,7 @@ faster than here.
 
 - **Desktop (GPU)**: run Kokoro there like RVC/diarization (sub-second per
   turn on a 3060ti; onnxruntime CUDAExecutionProvider or the torch path).
-- **Thin client**: keep kokoro-onnx as the local-CPU fallback tier — 7s/turn
+- **Boksi**: keep kokoro-onnx as the local-CPU fallback tier — 7s/turn
   is acceptable for an offline fallback (vs Piper's 1s), and it raises the
   fallback floor dramatically. Piper stays as last resort.
 - Proposed fallback chain: **cloud flux -> Kokoro -> Piper** (cloud first
@@ -342,7 +342,7 @@ CPU); the cloner race re-opens on GPU with Chatterbox-Turbo (350M).**
   master (`uv pip install git+https://github.com/resemble-ai/chatterbox`)
   which exposes `from_pretrained(device, nano=False)`.
 
-### Chatterbox-Nano on the thin client — MEASURED (2026-09-10, 2400GE CPU)
+### Chatterbox-Nano on the boksi — MEASURED (2026-09-10, 2400GE CPU)
 
 - Install: isolated `chatterbox-venv/` in repo root (gitignored),
   torch 2.6.0+cpu to avoid PyPI's CUDA wheel; Nano weights (HF
@@ -362,9 +362,9 @@ CPU); the cloner race re-opens on GPU with Chatterbox-Turbo (350M).**
   `8_nano_snake_chuckle.wav` (paralinguistic `[chuckle]` tag demo),
   `9_nano_snake_raw_take2.wav` (same text twice — zero-shot consistency
   probe).
-- **Implication: Nano-on-thin-client-CPU is NOT viable as a runtime
+- **Implication: Nano-on-boksi-CPU is NOT viable as a runtime
   fallback** (a 1000-char !generate would take ~10min). Nano/Turbo is
-  desktop-side only; the thin-client fallback tier stays Kokoro (measured
+  desktop-side only; the boksi fallback tier stays Kokoro (measured
   1.1-1.2x realtime here, sub-second on the desktop GPU).
 - **VERDICT (user-listened): Kokoro->RVC preferred over Nano.** Nano is
   ruled out entirely (quality below the Kokoro->RVC chain AND unusable
@@ -413,7 +413,7 @@ cloner (one clip set serves !speak and !rvc):
 - Benefit: unlocks pyannote.audio 4.x (torch>=2.8) with its quality gains,
   plus newer CUDA (cu126/cu128) if the driver supports it.
 - Two-machine note: with the split, the torch upgrade happens ONLY on the
-  desktop (worker server venv); the thin client keeps torch 2.4.1+cpu for
+  desktop (worker server venv); the boksi keeps torch 2.4.1+cpu for
   the local-fallback path. Versions must stay protocol-compatible — the
   HTTP contract decouples them better than a shared process did.
 
@@ -432,7 +432,7 @@ Desktop setup:
 4. [x] `python test_pipeline.py` pointed at the server (e2e Piper->RVC on GPU)
    — PASS, valid audio, **~11s for 2 turns (~5s/turn) vs ~41s local-CPU**.
 
-Thin client:
+Boksi:
 5. [ ] Bot with `RVC_GPU_SERVER_URL` set: single-voice `!rvc` and multi-voice
    `!rvc a,b <clip>` timing sanity (diarize + convert both remote) —
    PENDING (needs live Discord run; transport proven by 4).
@@ -442,7 +442,7 @@ Thin client:
    to local CPU worker with a status note, then recovers when the server
    returns — DONE at transport level: server down -> `test_pipeline.py`
    PASS via local worker in 41s; server back -> `/health` ok.
-8. Local-fallback venv stays intact on the thin client (decide Phase 3
+8. Local-fallback venv stays intact on the boksi (decide Phase 3
    slimming only after a few weeks of remote-only stability).
 
 ## Sub-repo: rvc-gpu-server (live 2026-09-18, submodule wired)
@@ -450,14 +450,14 @@ Thin client:
 Per user decision the desktop code lives in its own repo, pinned as a git
 submodule at `rvc-gpu-server/` (like `rvc_infer`). Live at `~/rvc-gpu-server`
 on ifrit as a real `git clone` of `haamis/rvc-gpu-server` (update with
-`git pull`; pushes go from the thin side):
+`git pull`; pushes go from the boksi side):
 
 - `server.py` — FastAPI shell, self-contained (no ttsbot imports).
 - `worker_owner.py` — worker subprocess owner, stdlib-only (5 tests).
 - `worker.py` — VERBATIM copy of `ttsbot/rvc/worker.py`; re-copy, never edit.
-- `tools/rvc_models.py` — voice-model downloader (prints thin-config block;
-  `--config` only when the thin checkout is mounted).
-- `rvc_infer/` + `rvc_models/` rsynced from thin (gitignored, not versioned).
+- `tools/rvc_models.py` — voice-model downloader (prints boksi-config block;
+  `--config` only when the boksi checkout is mounted).
+- `rvc_infer/` + `rvc_models/` rsynced from boksi (gitignored, not versioned).
 - `tests/test_server.py` (13 tests) + `pytest.ini` + `requirements-server.txt`.
 
 Fixes found during bring-up (already in the code): `ffmpeg-python` was
@@ -489,4 +489,4 @@ an ifrit `--user` systemd unit (`rvc-server.service`, auto-restarts on
 failure); boot persistence needs `sudo loginctl enable-linger haama`
 (Linger=no as of 2026-09-18 — without it the unit starts at first login,
 not at boot). Bearer token is set (`RVC_GPU_SERVER_TOKEN` in the server
-env file + thin `.env`).
+env file + boksi `.env`).
