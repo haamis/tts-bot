@@ -12,7 +12,7 @@ rvc_root: rvc_infer
 # all three (legacy), as do the old flat keys (tts, rvc_model, ...).
 voices:
   snake:
-    kokoro: {voice: am_adam, speed: 1.0}
+    kokoro: {voice: am_adam, speed: 0.9}
     cloud: {voice: flux-donovan-en, speed: 1.0}
     piper: {voice: en_US-ryan-medium, speed: 0.7}
     # f0_method: "pm" is ~2x faster on CPU (fine for clean TTS input);
@@ -21,28 +21,43 @@ voices:
           index: /home/haama/TTS-bot/rvc_models/snake/added_IVF967_Flat_nprobe_1_SSNAKE_v2.index,
           pitch: -5, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   trump:
-    kokoro: {voice: am_adam, speed: 1.0}
+    kokoro: {voice: am_eric, speed: 1.0}
     cloud: {voice: flux-donovan-en, speed: 1.0}
     piper: {voice: en_US-ryan-medium, speed: 0.7}
     rvc: {model: /home/haama/TTS-bot/rvc_models/trump/trump.pth,
           index: /home/haama/TTS-bot/rvc_models/trump/added_IVF1170_Flat_nprobe_1_trump_v2.index,
           pitch: 0, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   billy:
+    kokoro: {voice: am_liam, speed: 1.0}
     piper: {voice: en_US-ryan-medium, speed: 0.7}
     cloud: {voice: flux-donovan-en, speed: 1.0}
     rvc: {model: /home/haama/TTS-bot/rvc_models/billy/BillyModel.pth,
           index: /home/haama/TTS-bot/rvc_models/billy/added_IVF256_Flat_nprobe_1_BillyModel_v2.index,
           pitch: 2, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   otacon:
+    kokoro: {voice: am_eric, speed: 1.0}
     piper: {voice: en_US-ryan-medium, speed: 0.7}
     cloud: {voice: flux-donovan-en, speed: 1.0}
     rvc: {model: /home/haama/TTS-bot/rvc_models/otacon/Otacon.pth,
           index: /home/haama/TTS-bot/rvc_models/otacon/added_IVF373_Flat_nprobe_1_Otacon_v2.index,
           pitch: 0, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   colonel:
-    kokoro: {voice: am_adam, speed: 1.0}
+    kokoro: {voice: am_adam, speed: 0.9}
     piper: {voice: en_US-lessac-medium, speed: 0.7}
     rvc: {model: /home/haama/TTS-bot/rvc_models/rcampbell_rvcv2_rmvpe_400e/Rcambell.pth,
           index: /home/haama/TTS-bot/rvc_models/rcampbell_rvcv2_rmvpe_400e/added_IVF400_Flat_nprobe_1_Rcambell_v2.index,
-          pitch: -5, index_rate: 0.75, f0_method: pm, speaker_id: 0}
+          pitch: -5, index_rate: 0.75, f0_method: rmvpe, speaker_id: 0}
     # Added by tools/rvc_models.py — https://voice-models.com/model/ 'RCampbell_RVCv2_rmvpe_400E.zip'
+  armstrong:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/senatorarmstrong_20_400_20epochs/SenatorArmstrong.pth,
+          index: /home/haama/TTS-bot/rvc_models/senatorarmstrong_20_400_20epochs/added_IVF774_Flat_nprobe_1_SenatorArmstrong_v2.index,
+          pitch: 0, index_rate: 0.75, f0_method: pm, speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Senator Armstrong (MGR:R) (rmvpe) (RVC v2, 400 Epochs)'
+  raiden:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/raiden_mgs2/Raiden_MGS2.pth,
+          index: /home/haama/TTS-bot/rvc_models/raiden_mgs2/added_IVF553_Flat_nprobe_1_Raiden_MGS2_v2.index,
+          pitch: 0, index_rate: 0.75, f0_method: pm, speaker_id: 0}
