@@ -116,7 +116,9 @@ def test_insert_appends_inside_voices_section(tmp_path):
     assert entry["rvc"]["index"] == str(index)
     assert entry["rvc"]["f0_method"] == "pm"
     assert entry["rvc"]["pitch"] == 0
-    assert entry["piper"]["voice"] == "en_US-lessac-medium"
+    assert entry["piper"] == {"voice": "en_US-lessac-medium", "speed": 0.7}
+    assert entry["cloud"] == {"speed": 1.0}  # no voice: cloud tier skipped
+    assert "kokoro" not in entry  # inherits the global donor
     # untouched sibling preserved
     assert data["voices"]["snake"]["pitch"] == -5
     # new block comes after snake in the voices section
@@ -165,3 +167,16 @@ def test_slugify_and_default_name():
     assert default_voice_name("A Very Long " * 10, "model.zip").startswith("a_very_long")
     # over-long names are truncated
     assert len(default_voice_name("ignored", "https://x/" + "b" * 100 + ".zip")) == 40
+
+
+def test_formatted_entry_parses_as_voice_config(tmp_path):
+    from ttsbot.config import VoiceConfig
+
+    from rvc_models import format_voice_entry
+
+    block = format_voice_entry("newvoice", Path("/m/Voice.pth"), Path("/m/a.index"), "test")
+    entry = yaml.safe_load(block)["newvoice"]
+    voice = VoiceConfig.from_dict("newvoice", entry)
+    assert (voice.tts, voice.rvc_model) == ("en_US-lessac-medium", "/m/Voice.pth")
+    assert (voice.speed_local, voice.speed_cloud) == (0.7, 1.0)
+    assert voice.cloud_voice is None and voice.kokoro_voice is None
