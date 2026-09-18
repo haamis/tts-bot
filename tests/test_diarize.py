@@ -685,3 +685,26 @@ def test_assign_voices_unmeasured_surplus_keeps_original():
     )
     assert mapping[0] == "snake" and mapping[2] == "snake"
     assert 1 not in mapping
+
+
+def test_profile_mtime_tolerates_coarse_filesystems(tmp_path):
+    """sshfs reports whole seconds; a sub-second skew must not stale a profile."""
+    from ttsbot.media.diarize import load_profiles, profile_f0, save_profiles
+
+    model = tmp_path / "m.pth"
+    model.write_bytes(b"x")
+    actual = model.stat().st_mtime
+    profiles = {"v": {"f0": 120.0, "key": {
+        "model": str(model), "mtime": actual + 0.5, "pitch": 0,
+        "f0_method": "pm", "estimator": "rmvpe"}}}
+    save_profiles(tmp_path / "p.json", profiles)
+    loaded = load_profiles(tmp_path / "p.json")
+
+    class Cfg:
+        rvc_model = str(model)
+        pitch = 0
+        f0_method = "pm"
+
+    assert profile_f0(loaded, "v", Cfg()) == 120.0
+    loaded["v"]["key"]["mtime"] = actual + 5.0
+    assert profile_f0(loaded, "v", Cfg()) is None

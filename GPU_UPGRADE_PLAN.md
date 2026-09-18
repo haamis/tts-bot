@@ -475,7 +475,10 @@ on ifrit as a real `git clone` of `haamis/rvc-gpu-server` (update with
 - `worker.py` — VERBATIM copy of `ttsbot/rvc/worker.py`; re-copy, never edit.
 - `tools/rvc_models.py` — voice-model downloader (prints boksi-config block;
   `--config` only when the boksi checkout is mounted).
-- `rvc_infer/` + `rvc_models/` rsynced from boksi (gitignored, not versioned).
+- `rvc_infer/` rsynced from boksi, `rvc_models/` sshfs-mounted from ifrit
+  onto boksi's `rvc_models/` (ifrit is canonical; boksi reads through the
+  mount, so local RVC fallback needs the mount up — accepted). Voice
+  profile mtimes compare with 1s tolerance (sshfs reports whole seconds).
 - `tests/test_server.py` (13 tests) + `pytest.ini` + `requirements-server.txt`.
 
 Fixes found during bring-up (already in the code): `ffmpeg-python` was
