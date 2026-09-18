@@ -295,3 +295,21 @@ async def test_engine_local_pins_local(monkeypatch):
     monkeypatch.setattr(diarize_pyannote, "diarize_media_pyannote", fail_pyannote)
     out = await bot_mod.TTSBot._diarize(stub, "x.wav", ["a"], {}, None)
     assert out is result
+
+
+def test_pyannote_threshold_positive_sends_no_speaker_bounds(tmp_path):
+    src = tmp_path / "media.wav"
+    write_wav(str(src), np.concatenate([sine(110, 4.0), sine(250, 4.0)]), 16000)
+    captured = {}
+
+    def run(path, **kwargs):
+        captured.update(kwargs)
+        return fake_run([(0.0, 4.0, "SPEAKER_00"), (4.0, 8.0, "SPEAKER_01")])(path)
+
+    diarize_pyannote.diarize_media_pyannote(
+        str(src), ["a", "b"], voice_f0={"a": None, "b": None},
+        threshold=0.35, hf_token="x", run_fn=run,
+    )
+    # Natural count: capping at K forced merged clusters that flip voices
+    # mid-clip; surplus clusters now share voices downstream instead.
+    assert captured == {}

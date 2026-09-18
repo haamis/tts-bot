@@ -647,3 +647,41 @@ def test_diarize_rejects_trailing_noise_cluster(tmp_path):
     f0_otacon = result.cluster_f0[by_voice["otacon"]]
     assert f0_snake is not None and f0_otacon is not None
     assert f0_snake < f0_otacon
+
+
+def test_assign_voices_surplus_clusters_share_nearest_pitch():
+    from ttsbot.media.diarize import assign_voices
+
+    # 4 measured clusters, 2 profiled voices: nearest pitch wins per cluster.
+    mapping = assign_voices(
+        {0: 93.0, 1: 112.0, 2: 209.0, 3: 114.0},
+        ["snake", "otacon"],
+        {"snake": 111.0, "otacon": 143.0},
+        [0, 1, 2, 3],
+    )
+    assert mapping == {0: "snake", 1: "snake", 2: "otacon", 3: "snake"}
+
+
+def test_assign_voices_equal_counts_still_ranked():
+    from ttsbot.media.diarize import assign_voices
+
+    mapping = assign_voices(
+        {0: 220.0, 1: 100.0},
+        ["snake", "otacon"],
+        {"snake": 111.0, "otacon": 143.0},
+        [0, 1],
+    )
+    assert mapping == {1: "snake", 0: "otacon"}
+
+
+def test_assign_voices_unmeasured_surplus_keeps_original():
+    from ttsbot.media.diarize import assign_voices
+
+    mapping = assign_voices(
+        {0: 100.0, 1: None, 2: 300.0},
+        ["snake"],
+        {"snake": 111.0},
+        [0, 1, 2],
+    )
+    assert mapping[0] == "snake" and mapping[2] == "snake"
+    assert 1 not in mapping

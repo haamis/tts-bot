@@ -123,8 +123,18 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
     remote-first with local fallback (400 = data error, no retry).
     Verified: remote analysis == local CPU analysis segment-for-segment
     (24/24, f0s to 0.1Hz) on the 85s duo clip — 6.8s vs 42s.
-    Pyannote engine on the desktop deferred (server answers 501, boksi
-    falls back to local pyannote — no silent quality change).
+  - [x] DONE 2026-09-18 (pyannote engine): installed on ifrit, 85s duo in
+    ~16s cold / ~7s warm (~15-30x boksi CPU) at the same 38-segment
+    granularity as the listened A/B; profiles regenerated after the
+    pm->rmvpe flip restored rank-correct mapping.
+  - [x] DONE 2026-09-18 (speaker-count handling): pyannote finds its
+    NATURAL count (max_speakers cap removed — capping forced merged
+    clusters that flip voices mid-clip); surplus clusters share the
+    nearest-pitch voice instead of dropping to original audio. Proven on
+    Steamed Hams (4 real voices): uncapped finds 2 (males/females merged),
+    pinned threshold=0 with 4 voices separates all four (112/114/142/209Hz)
+    and rank-maps them stably. Rule of thumb: pass as many voices as
+    speakers; pin with threshold=0 only when sure of the count.
 - **Phase 2.5 (cloner pilot, GPU)**: Chatterbox-Turbo (350M, MIT) in its
   own desktop venv (`chatterbox-venv` recipe: torch 2.6.0+cpu wheel there
   becomes torch 2.6.0+cu121; PyPI 0.1.7 lacks newer model kwargs — pin

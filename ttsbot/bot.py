@@ -613,6 +613,11 @@ class TTSBot(commands.Bot):
             notes.append(
                 f"detected {result.detected} speaker(s) — using only {', '.join(sorted(used))}"
             )
+        if result.detected > len(voices):
+            notes.append(
+                f"{result.detected} speakers share {len(used)} voice(s) by pitch "
+                "(more speakers than voices — add voices to separate them)"
+            )
         unprofiled = [c.name for c in voices if voice_f0.get(c.name) is None]
         if unprofiled:
             notes.append(
