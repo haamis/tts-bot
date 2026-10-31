@@ -13,7 +13,7 @@ class VoiceConfig:
         self,
         name: str,
         tts: str,
-        rvc_model: str,
+        rvc_model: str = "",
         rvc_index: Optional[str] = None,
         pitch: int = 0,
         index_rate: float = 0.75,
@@ -24,6 +24,12 @@ class VoiceConfig:
         speed_kokoro: float = 1.0,
         cloud_voice: Optional[str] = None,
         kokoro_voice: Optional[str] = None,
+        # Reference clip for zero-shot VC (Chatterbox-VC). Path to ~10s clean audio.
+        # Used instead of RVC .pth when RVC_ENGINE=chatterbox_vc.
+        reference_clip: Optional[str] = None,
+        # TTS provider for this voice: "piper", "kokoro", "cloud", or "auto" (default).
+        # "piper" forces Piper TTS; useful for languages not supported by Kokoro/Cloud.
+        tts_provider: str = "auto",
     ):
         self.name = name
         self.tts = tts
@@ -38,6 +44,8 @@ class VoiceConfig:
         self.speed_kokoro = speed_kokoro
         self.cloud_voice = cloud_voice
         self.kokoro_voice = kokoro_voice
+        self.reference_clip = reference_clip
+        self.tts_provider = tts_provider
 
     @classmethod
     def from_dict(cls, name: str, data: dict) -> "VoiceConfig":
@@ -55,10 +63,8 @@ class VoiceConfig:
         tts = piper.get("voice", data.get("tts"))
         if not tts:
             raise KeyError(f"voice '{name}' needs piper.voice (legacy: tts)")
-        rvc_model = rvc.get("model", data.get("rvc_model"))
-        if not rvc_model:
-            raise KeyError(f"voice '{name}' needs rvc.model (legacy: rvc_model)")
-        return cls(
+        rvc_model = rvc.get("model", data.get("rvc_model", ""))
+        cfg = cls(
             name=name,
             tts=tts,
             rvc_model=rvc_model,
@@ -72,7 +78,13 @@ class VoiceConfig:
             speed_kokoro=kokoro.get("speed", data.get("speed_kokoro", legacy_speed)),
             cloud_voice=cloud.get("voice", data.get("cloud_voice")),
             kokoro_voice=kokoro.get("voice", data.get("kokoro_voice")),
+            reference_clip=rvc.get("reference_clip", data.get("reference_clip")),
+            tts_provider=rvc.get("tts_provider", data.get("tts_provider", "auto")),
         )
+        # Validate reference_clip exists if provided
+        if cfg.reference_clip and not Path(cfg.reference_clip).exists():
+            raise KeyError(f"voice '{name}' reference_clip not found: {cfg.reference_clip}")
+        return cfg
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +98,8 @@ class VoiceConfig:
                 "index_rate": self.index_rate,
                 "f0_method": self.f0_method,
                 "speaker_id": self.speaker_id,
+                "reference_clip": self.reference_clip,
+                "tts_provider": self.tts_provider,
             },
         }
 
@@ -193,5 +207,18 @@ def load_env() -> dict:
         "RVC_GPU_SERVER_URL": os.getenv("RVC_GPU_SERVER_URL", "").rstrip("/"),
         "RVC_GPU_SERVER_TOKEN": os.getenv("RVC_GPU_SERVER_TOKEN", ""),
         "RVC_GPU_SERVER_TIMEOUT": float(os.getenv("RVC_GPU_SERVER_TIMEOUT", "900")),
+        # Wake-on-LAN for the GPU server. Set MAC to wake the desktop before
+        # remote calls.
+        "RVC_GPU_SERVER_WOL_MAC": os.getenv("RVC_GPU_SERVER_WOL_MAC", "").replace("-", ":").lower(),
+        "RVC_GPU_SERVER_WOL_BROADCAST": os.getenv("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
+        # VC engine for !rvc: "rvc" (trained .pth models) or "chatterbox_vc" (zero-shot).
+        # RVC is default; Chatterbox-VC uses reference_clip from voice config.
+        "RVC_ENGINE": os.getenv("RVC_ENGINE", "rvc"),
+        # Fallback behavior when primary VC engine fails:
+        # "auto" = try other engine if primary fails (missing model/clip, GPU server down)
+        # "rvc" = always fall back to RVC (local CPU worker)
+        # "chatterbox_vc" = always fall back to Chatterbox-VC (requires GPU server)
+        # "none" = no fallback, fail the request
+        "RVC_FALLBACK": os.getenv("RVC_FALLBACK", "auto"),
         "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
     }

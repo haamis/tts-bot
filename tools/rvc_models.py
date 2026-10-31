@@ -4,29 +4,45 @@ them to config/voices.yaml.
 
 Usage:
   python tools/rvc_models.py search <query> [--page N]
-  python tools/rvc_models.py add <query|model-url|zip-url> [--as NAME] [--pick N] [--force]
-  python tools/rvc_models.py add-zip <local.zip> [--as NAME] [--force]
+  python tools/rvc_models.py add <query|model-url|zip-url> [--as NAME] [--pick N] [--force] [--no-sync]
+  python tools/rvc_models.py add-zip <local.zip> [--as NAME] [--force] [--no-sync]
+  python tools/rvc_models.py sync [NAME ...]
 
 `add` resolves the argument to a model zip (search terms -> first/picked
 result; voice-models.com model page -> its download link; anything else is
 treated as a direct zip URL), downloads and unpacks the .pth/.index into
 rvc_models/<name>/, then appends a new voice to config/voices.yaml (comments
 are preserved). Google Drive folder links are not supported — download
-manually and use `add-zip`. Restart the bot afterwards to pick up the new
-voice.
+manually and use `add-zip`.
+
+After installing, the tool wakes the GPU box (WOL) and rsyncs the voice dir
+to the same absolute path there, so remote inference works without a shared
+mount. `sync` retries/reconciles; `--no-sync` installs locally only.
+Restart the bot afterwards to pick up the new voice.
 """
 import argparse
+import os
 import re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import yaml
+from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from ttsbot.config import Config  # noqa: E402
+from ttsbot.network import send_wol  # noqa: E402
+
 BASE_URL = "https://voice-models.com"
 UA = {"User-Agent": "Mozilla/5.0 (ttsbot-rvc-models)"}
 DEFAULT_MODEL_DIR = PROJECT_ROOT / "rvc_models"
@@ -309,10 +325,162 @@ def add_voice_to_config(
     insert_voice_block(config_path, name, block)
 
 
+# --- GPU model sync ----------------------------------------------------------
+
+SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
+SSH_CMD = " ".join(("ssh", *SSH_OPTS))
+
+
+def sync_settings() -> tuple[str, str, float, str, str]:
+    """(server_url, rsync_dest, wake_timeout, wol_mac, wol_broadcast).
+
+    The dest defaults to the GPU box's copy of the local rvc_models dir, using
+    the host from RVC_GPU_SERVER_URL. Empty dest = sync disabled.
+    """
+    load_dotenv(PROJECT_ROOT / ".env")
+    url = os.getenv("RVC_GPU_SERVER_URL", "").rstrip("/")
+    dest = os.getenv("RVC_GPU_MODEL_SYNC_DEST", "").strip().rstrip("/")
+    if not dest and url:
+        host = urlparse(url).hostname
+        if host:
+            dest = f"{host}:{DEFAULT_MODEL_DIR}"
+    return (
+        url,
+        dest,
+        float(os.getenv("RVC_GPU_MODEL_SYNC_TIMEOUT", "180")),
+        os.getenv("RVC_GPU_SERVER_WOL_MAC", "").replace("-", ":").lower(),
+        os.getenv("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
+    )
+
+
+def _health_ok(url: str) -> bool:
+    try:
+        requests.get(f"{url}/health", timeout=2)
+        return True
+    except requests.RequestException:
+        return False
+
+
+def ensure_awake(url: str, mac: str, broadcast: str, timeout: float) -> bool:
+    """Probe /health, send WOL if down, poll until timeout. Any HTTP answer = up."""
+    if not url:
+        return True
+    if _health_ok(url):
+        return True
+    if mac:
+        print(f"Waking GPU server ({mac})...")
+        send_wol(mac, broadcast)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(2)
+        if _health_ok(url):
+            return True
+    return False
+
+
+def _rel_model_dir(src_dir: Path) -> str | None:
+    """Model dir relative to rvc_models/, or None when it lives elsewhere."""
+    try:
+        return src_dir.resolve().relative_to(DEFAULT_MODEL_DIR.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def sync_voice(src_dir: Path, dest: str, rel: str) -> None:
+    """rsync one voice dir to <dest>/<rel> (raises CalledProcessError)."""
+    try:
+        host, base = dest.split(":", 1)
+    except ValueError as e:
+        raise ValueError(
+            "RVC_GPU_MODEL_SYNC_DEST must look like host:/path, "
+            f"got {dest!r}"
+        ) from e
+    remote = f"{base.rstrip('/')}/{rel}"
+    subprocess.run(
+        ["ssh", *SSH_OPTS, host, f"mkdir -p -- {shlex.quote(remote)}"],
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+    subprocess.run(
+        ["rsync", "-a", "--delay-updates", "-e", SSH_CMD,
+         f"{src_dir}/", f"{dest}/{rel}/"],
+        check=True, capture_output=True, text=True, timeout=600,
+    )
+
+
+def _report_sync_error(e: Exception) -> None:
+    detail = (getattr(e, "stderr", "") or str(e)).strip().splitlines()
+    print(f"Model sync failed: {detail[-1] if detail else e}")
+
+
+def sync_voice_to_gpu(name: str, src_dir: Path) -> bool:
+    """Wake if needed and rsync one voice dir. False on any failure."""
+    url, dest, timeout, mac, broadcast = sync_settings()
+    if not dest:
+        print("Model sync skipped (RVC_GPU_SERVER_URL / RVC_GPU_MODEL_SYNC_DEST unset).")
+        return True
+    rel = _rel_model_dir(src_dir)
+    if rel is None:
+        print(f"Model sync skipped: {src_dir} is outside {DEFAULT_MODEL_DIR}.")
+        return False
+    if not ensure_awake(url, mac, broadcast, timeout):
+        print(f"GPU server did not wake within {timeout:.0f}s.")
+        return False
+    print(f"Syncing {name} -> {dest}/{rel}/")
+    try:
+        sync_voice(src_dir, dest, rel)
+    except (subprocess.SubprocessError, ValueError) as e:
+        _report_sync_error(e)
+        return False
+    return True
+
+
+def sync_models(names: list[str]) -> int:
+    """Sync named voices (default: all configured) to the GPU box. 0 = ok."""
+    url, dest, timeout, mac, broadcast = sync_settings()
+    if not dest:
+        print("Model sync skipped (RVC_GPU_SERVER_URL / RVC_GPU_MODEL_SYNC_DEST unset).")
+        return 0
+    cfg = Config.load(PROJECT_ROOT / "config" / "voices.yaml")
+    targets = names or sorted(cfg.voices)
+    failures = 0
+    awake = False
+    for name in targets:
+        voice = cfg.voices.get(name)
+        if voice is None:
+            print(f"{name}: unknown voice")
+            failures += 1
+            continue
+        if not voice.rvc_model:
+            print(f"{name}: no RVC model (skipped)")
+            continue
+        model = Path(voice.rvc_model)
+        if not model.exists():
+            print(f"{name}: model missing locally ({model})")
+            failures += 1
+            continue
+        rel = _rel_model_dir(model.parent)
+        if rel is None:
+            print(f"{name}: model is outside {DEFAULT_MODEL_DIR} (skipped)")
+            failures += 1
+            continue
+        if not awake:
+            if not ensure_awake(url, mac, broadcast, timeout):
+                print(f"GPU server did not wake within {timeout:.0f}s.")
+                return 1
+            awake = True
+        print(f"Syncing {name} -> {dest}/{rel}/")
+        try:
+            sync_voice(model.parent, dest, rel)
+        except (subprocess.SubprocessError, ValueError) as e:
+            _report_sync_error(e)
+            failures += 1
+    return 1 if failures else 0
+
+
 # --- command line ------------------------------------------------------------
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -323,10 +491,11 @@ def main(argv: list[str] | None = None) -> None:
     def add_common(p):
         p.add_argument("--as", dest="name", help="voice name (default: derived from the zip)")
         p.add_argument("--models-dir", type=Path, default=DEFAULT_MODEL_DIR,
-                       help="voice-model target dir (point at the mounted ifrit dir "
-                            "to install straight onto the GPU box)")
+                       help="voice-model dir (default: repo rvc_models/, mirrored to the GPU box)")
         p.add_argument("--config", type=Path, default=PROJECT_ROOT / "config" / "voices.yaml")
         p.add_argument("--force", action="store_true", help="overwrite existing model files")
+        p.add_argument("--no-sync", action="store_true",
+                       help="install locally only; do not sync to the GPU box")
 
     p_add = sub.add_parser("add", help="search/download a model and add it to the config")
     p_add.add_argument("target", help="search terms, voice-models.com model URL, or direct zip URL")
@@ -337,12 +506,18 @@ def main(argv: list[str] | None = None) -> None:
     p_zip.add_argument("zip", type=Path)
     add_common(p_zip)
 
+    p_sync = sub.add_parser("sync", help="sync local voice models to the GPU box")
+    p_sync.add_argument("names", nargs="*", help="voice names (default: all configured)")
+
     args = parser.parse_args(argv)
 
     if args.cmd == "search":
         for i, row in enumerate(search_models(args.query, args.page), 1):
             print(f"{i}) {row}")
-        return
+        return 0
+
+    if args.cmd == "sync":
+        return sync_models(args.names)
 
     provenance: str
     if args.cmd == "add":
@@ -367,7 +542,15 @@ def main(argv: list[str] | None = None) -> None:
         print("No .index in the zip — the voice will run without an index blend.")
     add_voice_to_config(args.config, name, pth, index, provenance, args.force)
     print(f"Voice '{name}' added. Restart the bot to pick it up.")
+    if args.no_sync:
+        print("Model sync skipped (--no-sync).")
+        return 0
+    if not sync_voice_to_gpu(name, Path(pth).parent):
+        print(f"Voice '{name}' is local-only; remote RVC rejects it until synced.")
+        print(f"Retry: python tools/rvc_models.py sync {name}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

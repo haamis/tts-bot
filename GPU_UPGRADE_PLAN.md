@@ -1,5 +1,9 @@
 # GPU upgrade plan — two-machine split (saved for GPU arrival)
 
+> **Historical as of 2026-10-30.** This document records how the two-machine
+> split was built and is kept for reference only. The current setup is
+> documented in `README.md`.
+
 Status markers: [x] done, [ ] pending GPU/install.
 
 ## Hardware plan
@@ -138,23 +142,39 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
 - **Phase 2.5 (cloner pilot, GPU)**: Chatterbox-Turbo (350M, MIT) in its
   own desktop venv (`chatterbox-venv` recipe: torch 2.6.0+cpu wheel there
   becomes torch 2.6.0+cu121; PyPI 0.1.7 lacks newer model kwargs — pin
-  the git master commit). `/tts` endpoint: text + voice + tags -> wav.
+  the git master commit). `/chatterbox` endpoint: text + voice + tags -> wav.
   Reference clips per voice (user-provided recordings; extraction recipe:
   energy-profile scan -> densest contiguous ~22s span, see
   `out/tts_compare/ref_snake_16k.wav`). A/B: Turbo vs Kokoro->RVC on the
   same sentences (Nano already ruled out: quality below the chain, 0.14-
   0.26x realtime on the boksi). Paralinguistic tags demoed working
   (`[chuckle]` in `8_nano_snake_chuckle.wav`). If Turbo wins, `!speak`
-  migrates to reference clips + `/tts`; RVC stays for `!rvc`.
+  migrates to reference clips + `/chatterbox`; RVC stays for `!rvc`.
+  - [x] DONE 2026-09-22: `/chatterbox` endpoint implemented on ifrit (Turbo + Nano),
+    Turbo ~2s/turn warm, Nano ~1s/turn warm on 3060Ti; paralinguistic tags work.
+    A/B vs Kokoro->RVC pending user listening.
 - **Phase 2.6 (VC pilots, GPU)**: `!rvc` engine A/B — Chatterbox-VC
   (same package, zero extra deps) then Seed-VC (GPL-3.0, archived Nov
   2025 — pin a commit). RVC stays default; same reference clips.
+  - [x] DONE 2026-09-22: `/vc` endpoint implemented on ifrit (Chatterbox-VC),
+    zero-shot VC working. Seed-VC pilot deferred (archived upstream).
+- **pyannote 4.x diarization pilot (GPU)**: GPU server upgraded to torch 2.8.0+cu126.
+  Code supports pyannote.audio 4.x API (`token` param, `speaker_diarization` output,
+  waveform dict input to bypass torchcodec). Model ID configurable via
+  `PYANNOTE_MODEL_ID` env var (default: `pyannote/speaker-diarization-community-1`).
+  Currently using pyannote 3.1 model (accepted conditions); 4.x `community-1`
+  model requires accepting new HF user conditions at hf.co/pyannote/speaker-diarization-community-1.
+  - [x] DONE 2026-09-22: Code changes complete; tested with pyannote 3.1 on GPU server.
 - **Phase 3 (optional slimming)**: once remote is the only path in
   practice, decide whether to drop pyannote/torchaudio/wav2vec2 deps from
   the boksi venv (slims the bot image; trades away the local-CPU
   fallback). Default: keep the fallback initially.
 - **Wake-on-LAN** for the desktop: optional nicety; bot pings WOL before a
   remote job when a magic-packet target is configured.
+  - [x] DONE 2026-09-22: `RVC_GPU_SERVER_WOL_MAC` / `RVC_GPU_SERVER_WOL_BROADCAST`
+    config options added; `send_wol()` utility in `ttsbot/rvc/runner.py`;
+    called before every remote RVC convert, diarize, and Chatterbox TTS/VC call.
+    Linger already enabled on ifrit (`Linger=yes`).
 
 ### Per-command data flow (after the split)
 
@@ -222,6 +242,14 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
   `segments/`). Assignment identical in rank (snake ~90-93Hz male,
   otacon ~216-223Hz female); pyannote segments are finer-grained (~1-4s
   turns, 16ms boundaries).
+- [x] **pyannote 4.x support (2026-09-22)**: code updated for pyannote.audio 4.x
+  API changes (`token` param, `speaker_diarization` output, torchcodec audio
+  loading bypass via torchaudio waveform dict). Model ID configurable via
+  `PYANNOTE_MODEL_ID` env var (default: `pyannote/speaker-diarization-community-1`).
+  GPU server upgraded to torch 2.8.0+cu126; works with pyannote 3.1 model.
+  pyannote 4.x `community-1` model requires accepting new HF user conditions.
+  - [x] DONE 2026-09-23: `exclusive_speaker_diarization` support added — prefers
+    non-overlapping turns for cleaner ASR alignment when available (4.x only).
 - **Measured CPU cost** (85.4s duo clip, warm-cache benchmark):
 
   | Engine | Diarization time | RSS |
@@ -246,6 +274,11 @@ LAN), NOT `yt-dlp` on the desktop. Rationale:
 whisperX word-level timestamps for surgical segment boundaries (adds
 faster-whisper/ctranslate2 deps). Skip until pyannote alone proves
 insufficient.
+- [x] DONE 2026-09-23: `POST /whisperx` endpoint implemented on ifrit (faster-whisper
+  medium + Wav2Vec2 alignment). Transcribes + aligns words; accepts optional
+  `diarization` JSON from `/diarize` to assign speaker labels to words/segments.
+  Uses ctranslate2 CUDA backend on GPU server. Model size configurable via
+  `WHISPERX_MODEL_SIZE` (default: `medium`).
 
 ## Local TTS upgrade: Kokoro (researched + measured 2026-09-10)
 
@@ -398,11 +431,13 @@ cloner (one clip set serves !speak and !rvc):
 - **Chatterbox-VC** (in the same package, `example_vc.py`): input wav +
   reference -> converted. Zero extra deps (already adopting chatterbox
   for the cloner). MIT. First thing to try.
+  - [x] DONE 2026-09-22: `POST /vc` endpoint implemented on ifrit, zero-shot
+    VC working.
 - **Seed-VC** (GPL-3.0 — fine for a private hobby bot): zero-shot VC +
   singing VC + accent/emotion conversion (V2); fine-tunable on ~1
   utterance; reported > RVCv2 speaker similarity on unseen voices.
   **Archived Nov 2025** (frozen upstream — acceptable for a pilot, but
-  pick a pinned commit).
+  pick a pinned commit). Pilot deferred.
 - Both are diffusion-based: expect ~0.1-0.3x realtime on the desktop GPU
   (RVC stays much faster); pilot AFTER the GPU machine exists.
 - Voice-models.com .pth ecosystem does NOT apply to these (they use
@@ -500,14 +535,22 @@ basename-recursive under `RVC_MODEL_ROOT` (per-voice subdirs preserved).
 - CUDA OOM maps to HTTP 503 (transient), NOT 400: boksi degrades to the
   local slow path with a status note instead of hard-failing the command.
 - Linger enabled on ifrit (`Linger=yes`): the user unit starts at boot.
-- 2026-09-18 A/B: eager mode (`RVC_CUDA_GRAPH=0`) beats graphs on every
-  axis — 30s in 3.3s (vs 3.1s), 150s in 5.6s (vs 9.9s chunked+graphs),
-  300s in 10.8s, VRAM flat ~0.9GB across all runs (vs 1.5–7.7GB). Graphs
-  stay OFF; chunking stays as the length safety net.
+  - 2026-09-18 A/B: eager mode (`RVC_CUDA_GRAPH=0`) beats graphs on every
+    axis — 30s in 3.3s (vs 3.1s), 150s in 5.6s (vs 9.9s chunked+graphs),
+    300s in 10.8s, VRAM flat ~0.9GB across all runs (vs 1.5–7.7GB). Graphs
+    stay OFF; chunking stays as the length safety net.
 
 Still TODO: none on the split itself. Operational notes: the server runs as
 an ifrit `--user` systemd unit (`rvc-server.service`, auto-restarts on
-failure); boot persistence needs `sudo loginctl enable-linger haama`
-(Linger=no as of 2026-09-18 — without it the unit starts at first login,
-not at boot). Bearer token is set (`RVC_GPU_SERVER_TOKEN` in the server
+failure); boot persistence confirmed (`Linger=yes` as of 2026-09-22).
+Bearer token is set (`RVC_GPU_SERVER_TOKEN` in the server
 env file + boksi `.env`).
+
+## New endpoints on the GPU server (Phase 2.5/2.6, 2026-09-22)
+- `POST /chatterbox` — Chatterbox-Turbo/Nano zero-shot TTS (text + optional ref clip -> wav).
+  Params: `text`, `audio_prompt_path` (optional), `model` (turbo|nano), `exaggeration`, `cfg_weight`.
+- `POST /vc` — Chatterbox-VC zero-shot voice conversion (source audio + target voice ref -> wav).
+  Params: `audio` (file), `target_voice` (file).
+
+Both use the same `chatterbox-venv` on the desktop (torch 2.6.0+cu121, numpy<2).
+RVC remains the default `!rvc` engine; VC pilot is behind an engine switch for A/B.

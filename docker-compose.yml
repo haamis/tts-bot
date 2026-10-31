@@ -1,0 +1,31 @@
+services:
+  tts-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tts-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    extra_hosts:
+      # Docker's embedded DNS does not resolve mDNS `.local` names. Keep this
+      # in sync with ifrit's LAN IP (a DHCP reservation is the durable fix);
+      # a stale address silently forces every request onto the local CPU path.
+      - "ifrit.local:192.168.1.162"
+    volumes:
+      - ./config:/app/config
+      - ${RVC_MODELS_HOST_PATH:-./rvc_models}:/home/haama/TTS-bot/rvc_models:ro
+      - tts_temp:/app/temp
+    environment:
+      - RVC_MODELS_DIR=/home/haama/TTS-bot/rvc_models
+      - TEMP_DIR=/app/temp
+      - BOT_DRY_RUN=${BOT_DRY_RUN:-0}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+volumes:
+  tts_temp:

@@ -148,6 +148,13 @@ python tools/rvc_models.py add "solid snake" --pick 1 --as snake_mgs1
 python tools/rvc_models.py add-zip ~/Downloads/Billy.zip --as billy  # manual download (Google Drive folders)
 ```
 
+After installing, the tool wakes the GPU box (WOL) and rsyncs the new voice
+to the same absolute path there using your existing SSH key, so remote
+inference works without a shared mount. `--no-sync` installs locally only;
+`python tools/rvc_models.py sync [name ...]` retries or reconciles voices
+(e.g. after moving models). A failed sync leaves the voice local-only —
+remote RVC returns 400 for it until synced.
+
 Tune the generated entry (pitch/speeds/`cloud_voice`) afterwards and restart
 the bot. Google Drive folder links aren't auto-downloadable — grab the zip
 manually and use `add-zip`.
@@ -273,28 +280,50 @@ Optimizations and their tradeoffs:
    more than speed.
 3. **`is_half` has no effect on CPU** — inference runs in float32 either way.
 
-## GPU worker server (Phase 1)
+## GPU worker server (ifrit)
 
 With a GPU desktop on the LAN, RVC conversion moves off the thin client:
 
-- **Desktop**: `cd rvc-gpu-server && python server.py` (submodule; needs `fastapi`,
-  `python-multipart` plus the RVC stack with the CUDA torch wheel).
+- **Desktop (Docker)**: from `rvc-gpu-server/`, run
+  `docker compose -f compose.yaml -f compose.gpu.yaml up -d --build` on the
+  2060 host (drop `-f compose.gpu.yaml` only for CPU-only hosts). The image
+  contains the Python stack
+  (`requirements-gpu.txt`, generated from the live venv); the big assets are
+  bind-mounted from the host: `~/TTS-bot/rvc_models` (same absolute path),
+  `~/rvc-gpu-server/rvc_infer`, `~/rvc-gpu-server/models`,
+  `~/ttsbot-diarize`, and the HuggingFace/torch caches. The server token and
+  `HF_TOKEN` come from `~/.config/rvc-server/env`.
   Exposes `POST /convert` (audio + RVC params -> converted wav),
-  `GET /health` (status, `device`, loaded model). It owns the same
-  persistent `worker.py` subprocess, so model caching, single-job
-  serialization and memory hygiene behave exactly like the local worker.
+  `GET /health` (status, `device`, loaded model), plus `/diarize`, `/tts`,
+  `/chatterbox`, `/vc`, and `/whisperx`. It owns the same persistent
+  `worker.py` subprocess, so model caching, single-job serialization and
+  memory hygiene behave exactly like the local worker.
+  CPU works as-is. With the 2060 installed, use the GPU override:
+  `docker compose -f compose.yaml -f compose.gpu.yaml up -d`. It adds
+  `gpus: all` and `ONNX_PROVIDER=CUDAExecutionProvider` (Kokoro on CUDA);
+  the default `RVC_SERVER_CHUNK_SEC=20` is sized for the 6GB card — raise it
+  on 8GB+. The old `rvc-server` systemd user unit is disabled.
+  **After suspend/resume** the worker's CUDA context is dead (open 595
+  modules, kernel 7.x); install `rvc-gpu-server/systemd/rvc-server-resume.service`
+  on the host so the container restarts on resume. Without it, WoL wakes the
+  machine but every `/convert` returns 503 until the container is restarted.
 - **Thin client**: set `RVC_GPU_SERVER_URL=http://<desktop>:8001`
   (+ optional `RVC_GPU_SERVER_TOKEN`). The bot uploads each turn/segment
-  and plays back the returned wav. Model paths are sent verbatim — mirror
-  the thin client's `rvc_models/` layout on the desktop, or point
-  `RVC_MODEL_ROOT` at a flat dir of `.pth`/`.index` files.
+  and plays back the returned wav.
+- **Models**: the bot host owns the canonical `rvc_models/<voice>/` dirs.
+  `tools/rvc_models.py` mirrors each voice to the desktop at the same
+  absolute path (see "Adding voices"), so the client's paths resolve
+  verbatim. `RVC_MODEL_ROOT` remains a basename fallback for a flat dir.
+  Sync settings: `RVC_GPU_MODEL_SYNC_DEST` (default: host from
+  `RVC_GPU_SERVER_URL` + this repo's `rvc_models/`) and
+  `RVC_GPU_MODEL_SYNC_TIMEOUT` (wake wait, default 180s).
 - **Fallback**: 4xx from the server fails fast (deterministic, e.g. bad
   model path); timeouts/5xx/connection errors degrade to the local CPU
   worker with a "⚠️ GPU server unreachable — used local slow path" status
   note. Empty URL = today's local behavior exactly.
 
-See `GPU_UPGRADE_PLAN.md` for the full two-machine split (Phase 2 adds
-remote diarization).
+`GPU_UPGRADE_PLAN.md` is a historical build log; this README is the current
+setup.
 
 ## Voice channel behavior
 

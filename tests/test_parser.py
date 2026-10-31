@@ -93,11 +93,12 @@ def test_config_load():
 
     for name, voice in config.voices.items():
         # every voice must point at real assets — catches path drift
-        model = Path(voice.rvc_model)
-        assert model.is_file(), f"{name}: rvc_model not found: {model}"
-        if voice.rvc_index:
-            index = Path(voice.rvc_index)
-            assert index.is_file(), f"{name}: rvc_index not found: {index}"
+        if voice.rvc_model:
+            model = Path(voice.rvc_model)
+            assert model.is_file(), f"{name}: rvc_model not found: {model}"
+            if voice.rvc_index:
+                index = Path(voice.rvc_index)
+                assert index.is_file(), f"{name}: rvc_index not found: {index}"
         assert voice.tts, f"{name}: missing piper voice"
         assert voice.f0_method in ("pm", "rmvpe")
         assert isinstance(voice.speaker_id, int) and voice.speaker_id >= 0

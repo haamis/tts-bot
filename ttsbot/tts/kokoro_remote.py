@@ -12,6 +12,9 @@ from pathlib import Path
 
 import aiohttp
 
+from ttsbot.network import send_wol
+from ttsbot.rvc.runner import PROTOCOL_HEADER, PROTOCOL_VERSION
+
 log = logging.getLogger("ttsbot.tts.kokoro_remote")
 
 
@@ -29,15 +32,21 @@ class KokoroRemoteRunner:
         server_url: str,
         server_token: str = "",
         server_timeout: float = 900,
+        wol_mac: str = "",
+        wol_broadcast: str = "255.255.255.255",
     ):
-        from ttsbot.rvc.runner import PROTOCOL_HEADER, PROTOCOL_VERSION
-
         self.server_url = (server_url or "").rstrip("/")
         self.server_token = server_token
         self.server_timeout = server_timeout
+        self.wol_mac = (wol_mac or "").replace("-", ":").lower()
+        self.wol_broadcast = wol_broadcast
         self._headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
         if server_token:
             self._headers["Authorization"] = f"Bearer {server_token}"
+
+    def _maybe_wol(self) -> None:
+        if self.server_url and self.wol_mac:
+            send_wol(self.wol_mac, self.wol_broadcast)
 
     async def synthesize(
         self, voice: str, text: str, output_path: str | Path, speed: float = 1.0
@@ -54,6 +63,7 @@ class KokoroRemoteRunner:
         try:
             timeout = aiohttp.ClientTimeout(total=self.server_timeout)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
+                self._maybe_wol()
                 async with sess.post(
                     self.server_url + "/tts", data=form, headers=self._headers
                 ) as resp:

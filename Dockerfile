@@ -1,0 +1,55 @@
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_SYSTEM_PYTHON=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=65536
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    libopenblas0 \
+    git \
+    curl \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# yt-dlp's YouTube extractor needs a JS runtime; deno is the default.
+# Pinned: the installer script tracks latest otherwise; `deno --version`
+# fails the build if the download produced nothing.
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s v2.9.8 \
+    && deno --version
+
+WORKDIR /app
+
+COPY requirements.txt requirements-rvc.txt ./
+
+RUN uv pip install --index-strategy unsafe-best-match \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    torch==2.4.1+cpu torchaudio==2.4.1+cpu
+
+RUN uv pip install -r requirements.txt \
+    && uv pip install -r requirements-rvc.txt
+
+COPY rvc_infer/ ./rvc_infer/
+COPY ttsbot/ ./ttsbot/
+COPY config/ ./config/
+COPY tools/ ./tools/
+COPY ttsbot-diarize/ ./ttsbot-diarize/
+COPY pyproject.toml ./
+COPY .env.example ./
+
+RUN uv pip install --no-deps -e . \
+    && uv pip install --no-deps -e ./ttsbot-diarize
+
+RUN mkdir -p /app/rvc_models /app/temp
+
+ENV RVC_MODELS_DIR=/app/rvc_models \
+    TEMP_DIR=/app/temp
+
+ENTRYPOINT ["python", "-m", "ttsbot.bot"]

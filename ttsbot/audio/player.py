@@ -42,9 +42,18 @@ class AudioPlayer:
             task.cancel()
 
     @staticmethod
-    def channel_is_empty(channel: discord.VoiceChannel) -> bool:
-        """True when `channel` has no human members left (bots don't count)."""
-        return not any(not m.bot for m in channel.members)
+    def channel_is_empty(channel: discord.VoiceChannel, exclude_member: discord.Member | None = None) -> bool:
+        """True when `channel` has no human members left (bots don't count).
+
+        `exclude_member` is a member who has just left (or is leaving) the channel
+        but may still appear in `channel.members` due to Discord.py cache timing.
+        """
+        for m in channel.members:
+            if m is exclude_member:
+                continue
+            if not m.bot:
+                return False
+        return True
 
     async def disconnect_guild(self, guild: discord.Guild) -> None:
         """Leave voice in `guild` and cancel its idle timer."""

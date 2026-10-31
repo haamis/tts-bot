@@ -1,6 +1,7 @@
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -8,12 +9,18 @@ import yaml
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
+import rvc_models  # noqa: E402
 from rvc_models import (  # noqa: E402
+    DEFAULT_MODEL_DIR,
     add_voice_to_config,
     default_voice_name,
+    ensure_awake,
     install_model,
     pick_model_files,
     slugify,
+    sync_settings,
+    sync_voice,
+    sync_models,
 )
 
 
@@ -180,3 +187,103 @@ def test_formatted_entry_parses_as_voice_config(tmp_path):
     assert (voice.tts, voice.rvc_model) == ("en_US-lessac-medium", "/m/Voice.pth")
     assert (voice.speed_local, voice.speed_cloud) == (0.7, 1.0)
     assert voice.cloud_voice is None and voice.kokoro_voice is None
+
+
+# --- GPU model sync ----------------------------------------------------------
+
+
+def _no_dotenv(monkeypatch):
+    monkeypatch.setattr(rvc_models, "load_dotenv", lambda *a, **k: None)
+
+
+def test_sync_settings_defaults_to_mirrored_models(monkeypatch):
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("RVC_GPU_SERVER_URL", "http://ifrit.local:8001/")
+    monkeypatch.delenv("RVC_GPU_MODEL_SYNC_DEST", raising=False)
+    monkeypatch.setenv("RVC_GPU_MODEL_SYNC_TIMEOUT", "7")
+    url, dest, timeout, _, _ = sync_settings()
+    assert url == "http://ifrit.local:8001"
+    assert dest == f"ifrit.local:{DEFAULT_MODEL_DIR}"
+    assert timeout == 7
+
+
+def test_sync_settings_explicit_dest_is_stripped(monkeypatch):
+    _no_dotenv(monkeypatch)
+    monkeypatch.setenv("RVC_GPU_MODEL_SYNC_DEST", "ifrit.local:/models/")
+    _, dest, _, _, _ = sync_settings()
+    assert dest == "ifrit.local:/models"
+
+
+def test_ensure_awake_skips_wol_when_server_is_up(monkeypatch):
+    monkeypatch.setattr(rvc_models, "_health_ok", lambda url: True)
+    monkeypatch.setattr(rvc_models, "send_wol", lambda *a: pytest.fail("unexpected WOL"))
+
+    assert ensure_awake("http://ifrit", "aa:bb:cc:dd:ee:ff", "255.255.255.255", 1)
+
+
+def test_ensure_awake_sends_wol_and_polls(monkeypatch):
+    states = iter([False, True])
+    wols = []
+    monkeypatch.setattr(rvc_models, "_health_ok", lambda url: next(states))
+    monkeypatch.setattr(rvc_models, "send_wol", lambda mac, bc: wols.append((mac, bc)))
+    monkeypatch.setattr(rvc_models.time, "sleep", lambda s: None)
+
+    assert ensure_awake("http://ifrit", "aa:bb:cc:dd:ee:ff", "255.255.255.255", 5)
+    assert wols == [("aa:bb:cc:dd:ee:ff", "255.255.255.255")]
+
+
+def test_ensure_awake_times_out(monkeypatch):
+    monkeypatch.setattr(rvc_models, "_health_ok", lambda url: False)
+    monkeypatch.setattr(rvc_models, "send_wol", lambda *a: None)
+
+    assert not ensure_awake("http://ifrit", "aa:bb:cc:dd:ee:ff", "255.255.255.255", 0)
+
+
+def test_sync_voice_mirrors_dir_with_rsync(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(rvc_models.subprocess, "run", lambda cmd, **kw: calls.append(cmd))
+    src = tmp_path / "rvc_models" / "newvoice"
+    src.mkdir(parents=True)
+
+    sync_voice(src, "ifrit.local:/mirror", "newvoice")
+
+    ssh_cmd, rsync_cmd = calls
+    assert ssh_cmd[0] == "ssh"
+    assert "mkdir -p" in ssh_cmd[-1] and "/mirror/newvoice" in ssh_cmd[-1]
+    assert rsync_cmd[0] == "rsync"
+    assert "-a" in rsync_cmd and "--delay-updates" in rsync_cmd
+    assert rsync_cmd[-2] == f"{src}/"
+    assert rsync_cmd[-1] == "ifrit.local:/mirror/newvoice/"
+
+
+def test_sync_voice_rejects_dest_without_host(tmp_path):
+    with pytest.raises(ValueError, match="host:/path"):
+        sync_voice(tmp_path, "/mirror", "x")
+
+
+def test_sync_models_syncs_existing_and_skips_rest(monkeypatch, tmp_path):
+    root = tmp_path / "rvc_models"
+    good_dir = root / "good"
+    good_dir.mkdir(parents=True)
+    good_model = good_dir / "good.pth"
+    good_model.write_bytes(b"x")
+
+    class FakeConfig:
+        voices = {
+            "good": SimpleNamespace(rvc_model=str(good_model)),
+            "missing": SimpleNamespace(rvc_model=str(root / "missing" / "m.pth")),
+            "no-rvc": SimpleNamespace(rvc_model=""),
+        }
+
+    monkeypatch.setattr(rvc_models, "Config", SimpleNamespace(load=lambda path: FakeConfig))
+    monkeypatch.setattr(rvc_models, "DEFAULT_MODEL_DIR", root)
+    monkeypatch.setattr(
+        rvc_models, "sync_settings",
+        lambda: ("http://ifrit", "ifrit.local:/mirror", 1, "", ""),
+    )
+    monkeypatch.setattr(rvc_models, "ensure_awake", lambda *a: True)
+    synced = []
+    monkeypatch.setattr(rvc_models, "sync_voice", lambda src, dest, rel: synced.append(rel))
+
+    assert sync_models(["good", "missing", "no-rvc"]) == 1
+    assert synced == ["good"]

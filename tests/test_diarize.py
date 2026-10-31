@@ -649,10 +649,11 @@ def test_diarize_rejects_trailing_noise_cluster(tmp_path):
     assert f0_snake < f0_otacon
 
 
-def test_assign_voices_surplus_clusters_share_nearest_pitch():
+def test_assign_voices_surplus_clusters_split_at_largest_gap():
     from ttsbot.media.diarize import assign_voices
 
-    # 4 measured clusters, 2 profiled voices: nearest pitch wins per cluster.
+    # 4 measured clusters, 2 profiled voices: contiguous pitch groups split
+    # at the largest gap (114->209Hz), lowest group takes the lowest voice.
     mapping = assign_voices(
         {0: 93.0, 1: 112.0, 2: 209.0, 3: 114.0},
         ["snake", "otacon"],
@@ -660,6 +661,70 @@ def test_assign_voices_surplus_clusters_share_nearest_pitch():
         [0, 1, 2, 3],
     )
     assert mapping == {0: "snake", 1: "snake", 2: "otacon", 3: "snake"}
+
+
+def test_assign_voices_surplus_uses_every_voice_trump_snake():
+    """Regression: '!rvc trump,snake' found 3 clusters (128/139/197Hz) and
+    mapped ALL of them to trump (nearest-match pile-up), leaving snake
+    unused. The largest-gap split gives {128,139} -> snake, {197} -> trump."""
+    from ttsbot.media.diarize import assign_voices
+
+    mapping = assign_voices(
+        {0: 128.0, 1: 139.0, 2: 197.0},
+        ["trump", "snake"],
+        {"trump": 145.2, "snake": 111.4},
+        [0, 1, 2],
+    )
+    assert mapping == {0: "snake", 1: "snake", 2: "trump"}
+    assert set(mapping.values()) == {"trump", "snake"}
+
+
+def test_assign_voices_surplus_uses_every_voice_ismo_seppo():
+    """Regression: '!rvc ismo,seppo' found 7 clusters (250-415Hz) and mapped
+    ALL of them to seppo (both profiles sit ~180Hz, every cluster was nearer
+    to seppo). The split must keep both voices in play and stay monotone in
+    pitch (a lower cluster never takes the higher voice)."""
+    from ttsbot.media.diarize import assign_voices
+
+    f0s = {0: 250.0, 1: 329.0, 2: 332.0, 3: 357.0, 4: 370.0, 5: 398.0, 6: 415.0}
+    voice_f0 = {"ismo": 178.0, "seppo": 186.4}
+    mapping = assign_voices(
+        f0s, ["ismo", "seppo"], voice_f0, [0, 1, 2, 3, 4, 5, 6],
+    )
+    assert set(mapping.values()) == {"ismo", "seppo"}
+    by_pitch = sorted(mapping, key=lambda c: f0s[c])
+    voice_pitch = [voice_f0[mapping[c]] for c in by_pitch]
+    assert voice_pitch == sorted(voice_pitch)
+
+
+def test_assign_voices_surplus_unprofiled_voice_still_used():
+    """A voice without a profile (stale model file) has no rank, but it must
+    still be used when speakers outnumber voices: profiled voices take their
+    nearest groups, leftovers go to unprofiled voices in config order."""
+    from ttsbot.media.diarize import assign_voices
+
+    mapping = assign_voices(
+        {0: 128.0, 1: 139.0, 2: 197.0},
+        ["trump", "newbie"],
+        {"trump": 145.2, "newbie": None},
+        [0, 1, 2],
+    )
+    assert mapping == {0: "trump", 1: "trump", 2: "newbie"}
+    assert set(mapping.values()) == {"trump", "newbie"}
+
+
+def test_assign_voices_surplus_every_voice_used_with_unprofiled():
+    """3 clusters would rank-match 1:1, but a 4th surplus cluster plus an
+    unprofiled voice: all three voices stay in play, profiled ones monotone."""
+    from ttsbot.media.diarize import assign_voices
+
+    f0s = {0: 128.0, 1: 139.0, 2: 197.0, 3: 260.0}
+    voice_f0 = {"trump": 145.2, "snake": 111.4, "newbie": None}
+    mapping = assign_voices(
+        f0s, ["trump", "snake", "newbie"], voice_f0, [0, 1, 2, 3],
+    )
+    assert mapping == {0: "trump", 1: "trump", 2: "snake", 3: "newbie"}
+    assert set(mapping.values()) == {"trump", "snake", "newbie"}
 
 
 def test_assign_voices_equal_counts_still_ranked():

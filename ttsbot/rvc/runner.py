@@ -7,6 +7,8 @@ from pathlib import Path
 
 import aiohttp
 
+from ttsbot.network import send_wol
+
 log = logging.getLogger("ttsbot.rvc")
 
 WORKER_SCRIPT = Path(__file__).resolve().parent / "worker.py"
@@ -34,6 +36,8 @@ class RvcRunner:
         server_url: str = "",
         server_token: str = "",
         server_timeout: float = 900,
+        wol_mac: str = "",
+        wol_broadcast: str = "255.255.255.255",
     ):
         self.infer_script = Path(infer_script)
         self.rvc_root = Path(rvc_root).resolve()
@@ -44,6 +48,8 @@ class RvcRunner:
         self.server_url = (server_url or "").rstrip("/")
         self.server_token = server_token
         self.server_timeout = server_timeout
+        self.wol_mac = (wol_mac or "").replace("-", ":").lower()
+        self.wol_broadcast = wol_broadcast
         self._worker: asyncio.subprocess.Process | None = None
         self._worker_lock = asyncio.Lock()
         self._worker_disabled = False
@@ -54,6 +60,11 @@ class RvcRunner:
         # Last worker ready-handshake ({"device": ..., "threads": ...});
         # the GPU server surfaces it via /health.
         self.worker_info: dict = {}
+
+    def _maybe_wol(self) -> None:
+        """Send WOL packet if configured and we're using a remote server."""
+        if self.server_url and self.wol_mac:
+            send_wol(self.wol_mac, self.wol_broadcast)
 
     async def convert(
         self,
@@ -114,6 +125,77 @@ class RvcRunner:
             rms_mix_rate, protect, speaker_id,
         )
 
+    async def convert_vc(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        target_voice_path: str | Path,
+    ) -> str:
+        """Zero-shot voice conversion via Chatterbox-VC on the GPU server.
+
+        Requires RVC_GPU_SERVER_URL and a target reference clip. The local
+        CPU fallback is not available for Chatterbox-VC (diffusion model
+        requires GPU).
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+        target_voice_path = Path(target_voice_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not self.server_url:
+            raise RuntimeError("Chatterbox-VC requires RVC_GPU_SERVER_URL (GPU server)")
+
+        if not target_voice_path.exists():
+            raise RuntimeError(f"Target voice reference not found: {target_voice_path}")
+
+        self._maybe_wol()
+        headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
+        if self.server_token:
+            headers["Authorization"] = f"Bearer {self.server_token}"
+        form = aiohttp.FormData()
+        form.add_field(
+            "audio",
+            input_path.read_bytes(),
+            filename=input_path.name,
+            content_type="audio/wav",
+        )
+        form.add_field(
+            "target_voice",
+            target_voice_path.read_bytes(),
+            filename=target_voice_path.name,
+            content_type="audio/wav",
+        )
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.server_timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(
+                    self.server_url + "/vc", data=form, headers=headers
+                ) as resp:
+                    body = await resp.read()
+                    if 400 <= resp.status < 500:
+                        raise RVCRequestError(
+                            f"GPU server rejected VC request (HTTP {resp.status}): "
+                            f"{body[:300].decode(errors='replace')}"
+                        )
+                    if resp.status != 200:
+                        raise WorkerCrashed(
+                            f"GPU server VC error (HTTP {resp.status}): "
+                            f"{body[:300].decode(errors='replace')}"
+                        )
+                    output_path.write_bytes(body)
+        except (RVCRequestError, WorkerCrashed):
+            raise
+        except asyncio.TimeoutError as e:
+            raise WorkerCrashed(f"GPU server VC timed out: {e}") from e
+        except Exception as e:
+            raise WorkerCrashed(f"GPU server VC unreachable: {e}") from e
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(f"GPU server returned empty audio")
+        self.last_via = "remote"
+        return str(output_path)
+
     def _check_paths(self, model_path: str, index_path: str | None) -> None:
         if not (self.rvc_root / self.infer_script).exists():
             raise RuntimeError(f"RVC infer script not found: {self.rvc_root / self.infer_script}")
@@ -134,6 +216,7 @@ class RvcRunner:
         (5xx, timeout, connection error) -> WorkerCrashed so the caller
         degrades to the local CPU worker with identical retry semantics.
         """
+        self._maybe_wol()
         headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
         if self.server_token:
             headers["Authorization"] = f"Bearer {self.server_token}"

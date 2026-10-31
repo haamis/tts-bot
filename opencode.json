@@ -12,5 +12,6 @@
         "reportAttributeAccessIssue": "none"
       }
     }
-  }
+  },
+  "plugin": ["@dietrichgebert/ponytail"]
 }

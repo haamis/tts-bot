@@ -11,9 +11,9 @@ from discord import app_commands
 
 from ttsbot.config import Config, load_env
 from ttsbot.parser import Turn, parse_dialogue, ParseError
-from ttsbot.pipeline import Pipeline, RequestCancelled
+from ttsbot.pipeline import Pipeline, RequestCancelled, fallback_chain
 from ttsbot.tts.manager import build_tts_manager
-from ttsbot.rvc.runner import RvcRunner
+from ttsbot.rvc.runner import RvcRunner, RVCRequestError
 from ttsbot.media.ytdlp_runner import YtdlpRunner, YtdlpAuthError
 from ttsbot.media import diarize
 from ttsbot.llm.openrouter import (
@@ -71,7 +71,11 @@ class TTSBot(commands.Bot):
                 server_url=env["RVC_GPU_SERVER_URL"],
                 server_token=env["RVC_GPU_SERVER_TOKEN"],
                 server_timeout=env["RVC_GPU_SERVER_TIMEOUT"],
+                wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
+                wol_broadcast=env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
             ),
+            rvc_engine=env.get("RVC_ENGINE", "rvc"),
+            rvc_fallback=env.get("RVC_FALLBACK", "auto"),
         )
         self.player = AudioPlayer(
             ffmpeg_path=config.ffmpeg_path,
@@ -104,6 +108,61 @@ class TTSBot(commands.Bot):
     async def close(self):
         await self.pipeline.rvc.shutdown()
         await super().close()
+
+    async def _convert_segment_with_fallback(
+        self,
+        segment_index: int,
+        slice_path: Path,
+        output_path: Path,
+        cfg,
+        set_status,
+    ) -> str:
+        """Convert a single segment with fallback between VC engines.
+
+        Returns the output path. Raises on unrecoverable failure.
+        """
+        primary_engine = self.env.get("RVC_ENGINE", "rvc")
+        engines_to_try = fallback_chain(
+            primary_engine,
+            self.env.get("RVC_FALLBACK", "auto"),
+            bool(cfg.reference_clip),
+        )
+
+        last_error = None
+        for engine in engines_to_try:
+            try:
+                if engine == "chatterbox_vc":
+                    if not cfg.reference_clip:
+                        raise RuntimeError(f"Voice '{cfg.name}' has no reference_clip for Chatterbox-VC")
+                    await self.pipeline.rvc.convert_vc(
+                        input_path=str(slice_path),
+                        output_path=str(output_path),
+                        target_voice_path=cfg.reference_clip,
+                    )
+                else:
+                    await self.pipeline.rvc.convert(
+                        input_path=str(slice_path),
+                        output_path=str(output_path),
+                        model_path=cfg.rvc_model,
+                        index_path=cfg.rvc_index,
+                        pitch=cfg.pitch,
+                        index_rate=cfg.index_rate,
+                        f0_method=cfg.f0_method,
+                        speaker_id=cfg.speaker_id,
+                    )
+                if engine != primary_engine:
+                    await set_status(f"⚠️ Fallback to {engine} for {cfg.name}: {last_error}")
+                return str(output_path)
+            except Exception as e:
+                if isinstance(e, RVCRequestError):
+                    # Deterministic request error: another VC engine cannot fix it.
+                    raise
+                last_error = e
+                log.warning("Engine %s failed for %s (seg %d): %s", engine, cfg.name, segment_index, e)
+                continue
+
+        # All engines exhausted
+        raise RuntimeError(f"All VC engines failed for {cfg.name} (seg {segment_index}): {last_error}")
 
     async def on_ready(self):
         log.info(f"Logged in as {self.user} (ID: {self.user.id})")
@@ -162,7 +221,10 @@ class TTSBot(commands.Bot):
         if not (someone_left or bot_moved):
             return
 
-        if not self.player.channel_is_empty(channel):
+        # Pass the member who left (if any) so channel_is_empty can exclude them
+        # from the count, since Discord.py's cache may not have updated yet.
+        exclude = member if someone_left else None
+        if not self.player.channel_is_empty(channel, exclude_member=exclude):
             return
         log.info("No humans left in %s, disconnecting (guild %s)", channel, guild.id)
         await self.player.disconnect_guild(guild)
@@ -254,10 +316,23 @@ class TTSBot(commands.Bot):
 
     def _resolve_voice_spec(self, spec: str) -> list[str] | None:
         """Parse 'a,b,c' into validated voice names (order kept, dupes dropped).
+        'all' expands to all voices with RVC models configured.
 
         None when any name is unknown. One name -> monologue, several ->
         multi-voice dialogue. Accepts the %tag prefix for symmetry with !speak.
         """
+        spec = (spec or "").strip()
+        if spec.lower() == "all":
+            # Return all voices that have RVC models configured
+            usable = [
+                name for name, vc in self.config.voices.items()
+                if vc.rvc_model and Path(vc.rvc_model).exists()
+            ]
+            skipped = [name for name in self.config.voices if name not in usable]
+            if skipped:
+                log.warning("'all' skips voices without a local RVC model: %s", ", ".join(skipped))
+            return usable
+
         voices: list[str] = []
         for token in (spec or "").split(","):
             name = token.strip().lstrip("%")
@@ -499,22 +574,54 @@ class TTSBot(commands.Bot):
                     shutil.rmtree(workdir, ignore_errors=True)
 
     async def _convert_single(self, source_path: str, voice_cfg, workdir, dur_note, set_status, cancel: asyncio.Event | None = None) -> None:
-        """Original single-voice path: whole media through one RVC model."""
+        """Single-voice path: whole media through selected VC engine (RVC or Chatterbox-VC)."""
         if cancel is not None and cancel.is_set():
             raise RequestCancelled("cancelled")
         await set_status(
             f"⏳ Converting to **{voice_cfg.name}**{dur_note} (this can take a while)..."
         )
-        await self.pipeline.rvc.convert(
-            input_path=str(source_path),
-            output_path=str(workdir / "converted.wav"),
-            model_path=voice_cfg.rvc_model,
-            index_path=voice_cfg.rvc_index,
-            pitch=voice_cfg.pitch,
-            index_rate=voice_cfg.index_rate,
-            f0_method=voice_cfg.f0_method,
-            speaker_id=voice_cfg.speaker_id,
+        # Use the same fallback logic as multi-voice path
+        primary_engine = self.env.get("RVC_ENGINE", "rvc")
+        engines_to_try = fallback_chain(
+            primary_engine,
+            self.env.get("RVC_FALLBACK", "auto"),
+            bool(voice_cfg.reference_clip),
         )
+
+        last_error = None
+        for engine in engines_to_try:
+            try:
+                if engine == "chatterbox_vc":
+                    if not voice_cfg.reference_clip:
+                        raise RuntimeError(f"Voice '{voice_cfg.name}' has no reference_clip for Chatterbox-VC")
+                    await self.pipeline.rvc.convert_vc(
+                        input_path=str(source_path),
+                        output_path=str(workdir / "converted.wav"),
+                        target_voice_path=voice_cfg.reference_clip,
+                    )
+                else:
+                    await self.pipeline.rvc.convert(
+                        input_path=str(source_path),
+                        output_path=str(workdir / "converted.wav"),
+                        model_path=voice_cfg.rvc_model,
+                        index_path=voice_cfg.rvc_index,
+                        pitch=voice_cfg.pitch,
+                        index_rate=voice_cfg.index_rate,
+                        f0_method=voice_cfg.f0_method,
+                        speaker_id=voice_cfg.speaker_id,
+                    )
+                if engine != primary_engine:
+                    await set_status(f"⚠️ Fallback to {engine}: {last_error}")
+                return
+            except Exception as e:
+                if isinstance(e, RVCRequestError):
+                    # Deterministic request error: another VC engine cannot fix it.
+                    raise
+                last_error = e
+                log.warning("Engine %s failed for %s: %s", engine, voice_cfg.name, e)
+                continue
+
+        raise RuntimeError(f"All VC engines failed for {voice_cfg.name}: {last_error}")
 
     async def _diarize(self, source_path: str, voice_names: list[str], voice_f0, set_status):
         """Multi-voice speaker diarization via the configured engine.
@@ -554,6 +661,8 @@ class TTSBot(commands.Bot):
                     resolved,
                     len(voice_names),
                     threshold,
+                    self.env.get("RVC_GPU_SERVER_WOL_MAC", ""),
+                    self.env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
                 )
                 return diarize.finalize_result(
                     analysis, source_path, voice_names, voice_f0
@@ -654,18 +763,14 @@ class TTSBot(commands.Bot):
                 if c.name == result.voice_of_cluster[result.segments[i].cluster]
             )
             try:
-                out_path = workdir / f"seg_{i:03d}_rvc.wav"
-                await self.pipeline.rvc.convert(
-                    input_path=str(slices[i]),
-                    output_path=str(out_path),
-                    model_path=cfg.rvc_model,
-                    index_path=cfg.rvc_index,
-                    pitch=cfg.pitch,
-                    index_rate=cfg.index_rate,
-                    f0_method=cfg.f0_method,
-                    speaker_id=cfg.speaker_id,
+                out_path = await self._convert_segment_with_fallback(
+                    segment_index=i,
+                    slice_path=slices[i],
+                    output_path=workdir / f"seg_{i:03d}_rvc.wav",
+                    cfg=cfg,
+                    set_status=set_status,
                 )
-                outs[i] = str(out_path)
+                outs[i] = out_path
             except Exception as e:
                 raise RuntimeError(f"segment {done}/{len(order)} ({cfg.name}) failed: {e}") from e
             if done % 5 == 0 or done == len(order):
@@ -881,7 +986,7 @@ async def main():
         from ttsbot.parser import parse_dialogue
         from ttsbot.pipeline import Pipeline
         from ttsbot.tts.manager import build_tts_manager
-        from ttsbot.rvc.runner import RvcRunner
+        from ttsbot.rvc.runner import RvcRunner, RVCRequestError
 
         pipeline = Pipeline(
             tts=build_tts_manager(env, ffmpeg_path=config.ffmpeg_path),
@@ -892,7 +997,11 @@ async def main():
                 server_url=env.get("RVC_GPU_SERVER_URL", ""),
                 server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
                 server_timeout=env.get("RVC_GPU_SERVER_TIMEOUT", 900),
+                wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
+                wol_broadcast=env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
             ),
+            rvc_engine=env.get("RVC_ENGINE", "rvc"),
+            rvc_fallback=env.get("RVC_FALLBACK", "auto"),
         )
 
         # Test with a sample dialogue

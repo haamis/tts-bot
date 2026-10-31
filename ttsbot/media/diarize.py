@@ -24,7 +24,7 @@ from pathlib import Path
 import librosa
 import numpy as np
 
-from ttsbot.media.audio import (
+from ttsbot_diarize.audio import (
     concat_audio,
     load_mono,
     resample,
@@ -525,6 +525,26 @@ def cluster_f0s(
     return out
 
 
+def _pitch_groups(
+    measured: list[int], f0s: dict[int, float | None], n: int
+) -> list[list[int]]:
+    """Split f0-ascending `measured` into `n` contiguous groups at the
+    largest log2 pitch gaps (the natural speaker-boundary hypotheses)."""
+    n = max(1, min(n, len(measured)))
+    gaps = sorted(
+        range(len(measured) - 1),
+        key=lambda i: abs(math.log2(float(f0s[measured[i + 1]]) / float(f0s[measured[i]]))),
+        reverse=True,
+    )
+    cuts = sorted(gaps[: n - 1])
+    groups: list[list[int]] = []
+    start = 0
+    for cut in cuts + [len(measured) - 1]:
+        groups.append(measured[start:cut + 1])
+        start = cut + 1
+    return groups
+
+
 def assign_voices(
     f0s: dict[int, float | None],
     voices: list[str],
@@ -546,11 +566,18 @@ def assign_voices(
     config order. A cluster with no voice left over stays unmapped (its
     segments keep the original audio).
 
-    More clusters than voices (multi-speaker clip, few models): every
-    measured surplus cluster shares its nearest-pitch voice instead of
-    dropping to original audio — a stable global mapping, so voices never
-    flip mid-clip. Unmeasured surplus clusters keep original audio (no pitch
-    to place them by).
+    More clusters than voices (multi-speaker clip, few models): the
+    pitch-sorted clusters are split into one contiguous group per voice at
+    the largest pitch gaps — lowest group takes the lowest voice, and so
+    on. The largest gap is the natural speaker-boundary hypothesis;
+    per-cluster nearest-match instead piles every cluster onto whichever
+    voice sits closest to the clip's range and leaves the other requested
+    voice(s) unused. A voice without a profile has no rank, so the profiled
+    voices take their nearest groups 1:1 and leftover groups go to the
+    unprofiled voices in config order. Either way every requested voice is
+    used at least once whenever detected speakers outnumber voices.
+    Unmeasured surplus clusters keep original audio (no pitch to place them
+    by).
     """
     order = {c: i for i, c in enumerate(first_appearance)}
     voice_order = {v: i for i, v in enumerate(voices)}
@@ -568,13 +595,44 @@ def assign_voices(
         # Full rank alignment: monotone in pitch by construction.
         mapping.update(zip(measured, profiled))
     elif profiled and len(measured) > len(voices):
-        # Surplus measured clusters (more speakers than voices): every
-        # cluster takes its nearest-pitch voice, many-to-one. Running the
-        # 1:1 greedy first would spend voices on the closest pairs and
-        # strand near-duplicate clusters on far voices (or silence).
-        for c in measured:
-            v = min(profiled, key=lambda v: abs(math.log2(float(f0s[c]) / float(voice_f0[v]))))
-            mapping[c] = v
+        # Surplus measured clusters (more speakers than voices): contiguous
+        # pitch groups, one per voice, split at the largest gaps (see
+        # docstring). `measured` is already f0-ascending.
+        groups = _pitch_groups(measured, f0s, len(voices))
+        if len(profiled) == len(voices):
+            # Full information: rank-match, lowest group -> lowest voice.
+            for group, v in zip(groups, profiled):
+                for c in group:
+                    mapping[c] = v
+        else:
+            # Partial information (a voice without a profile has no rank):
+            # profiled voices take their nearest groups 1:1, leftover groups
+            # go to the unprofiled voices in config order.
+            medians = [float(np.median([f0s[c] for c in g])) for g in groups]
+            candidates = sorted(
+                (
+                    abs(math.log2(med / float(voice_f0[v]))),
+                    i,
+                    voice_order[v],
+                    v,
+                )
+                for i, med in enumerate(medians)
+                for v in profiled
+            )
+            taken_groups: set[int] = set()
+            taken_voices: set[str] = set()
+            for _, i, _, v in candidates:
+                if i in taken_groups or v in taken_voices:
+                    continue
+                for c in groups[i]:
+                    mapping[c] = v
+                taken_groups.add(i)
+                taken_voices.add(v)
+            rest_groups = [g for i, g in enumerate(groups) if i not in taken_groups]
+            rest_voices = [v for v in voices if v not in taken_voices]
+            for g, v in zip(rest_groups, rest_voices):
+                for c in g:
+                    mapping[c] = v
     else:
         # Partial information: closest-match the known subset...
         candidates = sorted(

@@ -63,10 +63,21 @@ voices:
 
 
 def test_missing_required_keys_raise(tmp_path):
-    with pytest.raises(KeyError):
-        _write(tmp_path, "voices:\n  bad:\n    piper: {voice: x}\n")
+    # Missing piper voice should still raise
     with pytest.raises(KeyError):
         _write(tmp_path, "voices:\n  bad:\n    rvc: {model: /m.pth}\n")
+
+
+def test_missing_reference_clip_raises(tmp_path):
+    with pytest.raises(KeyError, match="reference_clip"):
+        _write(tmp_path, """\
+voices:
+  bad:
+    piper: {voice: en_US-lessac-medium}
+    rvc:
+      model: /m/bad.pth
+      reference_clip: /does/not/exist.wav
+""")
 
 
 def test_to_dict_roundtrip_is_grouped(tmp_path):

@@ -2,7 +2,7 @@ default_tts: en_US-lessac-medium
 # NOTE: voice config only — all limits (MAX_CHARS, MAX_MEDIA_SECONDS, ...)
 # live in .env. A stale `max_chars:` key here is ignored.
 # Extra text appended (after a newline) to every !generate prompt.
-generate_prompt_suffix: Use a maximum of 4500 characters.
+generate_prompt_suffix: Use a maximum of 2000 characters.
 ffmpeg_path: ffmpeg
 rvc_root: rvc_infer
 # Per-voice options, grouped by provider. Speeds are per-mechanism (they
@@ -21,7 +21,7 @@ voices:
           index: /home/haama/TTS-bot/rvc_models/snake/added_IVF967_Flat_nprobe_1_SSNAKE_v2.index,
           pitch: -5, index_rate: 0.85, f0_method: rmvpe, speaker_id: 0}
   trump:
-    kokoro: {voice: am_eric, speed: 1.0}
+    kokoro: {voice: am_eric, speed: 0.9}
     cloud: {voice: flux-donovan-en, speed: 1.0}
     piper: {voice: en_US-ryan-medium, speed: 0.7}
     rvc: {model: /home/haama/TTS-bot/rvc_models/trump/trump.pth,
@@ -53,11 +53,87 @@ voices:
     cloud: {speed: 1.0}
     rvc: {model: /home/haama/TTS-bot/rvc_models/senatorarmstrong_20_400_20epochs/SenatorArmstrong.pth,
           index: /home/haama/TTS-bot/rvc_models/senatorarmstrong_20_400_20epochs/added_IVF774_Flat_nprobe_1_SenatorArmstrong_v2.index,
-          pitch: 0, index_rate: 0.75, f0_method: pm, speaker_id: 0}
+          pitch: 0, index_rate: 0.75, f0_method: rmvpe, speaker_id: 0}
     # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Senator Armstrong (MGR:R) (rmvpe) (RVC v2, 400 Epochs)'
   raiden:
     piper: {voice: en_US-lessac-medium, speed: 0.7}
     cloud: {speed: 1.0}
+    kokoro: {voice: am_eric, speed: 1.0}
     rvc: {model: /home/haama/TTS-bot/rvc_models/raiden_mgs2/Raiden_MGS2.pth,
           index: /home/haama/TTS-bot/rvc_models/raiden_mgs2/added_IVF553_Flat_nprobe_1_Raiden_MGS2_v2.index,
-          pitch: 0, index_rate: 0.75, f0_method: pm, speaker_id: 0}
+          pitch: 0, index_rate: 0.75, f0_method: rmvpe, speaker_id: 0}
+  van:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/van/Van.pth,
+          index: /home/haama/TTS-bot/rvc_models/van/added_IVF86_Flat_nprobe_1_Van_v2.index,
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: rmvpe,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Van Darkholme (Gachimuchi) (RVC V2) - 1000 epochs'
+  meiling:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    kokoro: {voice: af_heart, speed: 0.8}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/meiling_20mgs1_20rmvpe_20rvc_20v2_20280e/Mei_Ling.pth,
+          index: /home/haama/TTS-bot/rvc_models/meiling_20mgs1_20rmvpe_20rvc_20v2_20280e/added_IVF679_Flat_nprobe_1_Mei_Ling_v2.index,
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: rmvpe,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Meiling%20MGS1%20rmvpe%20RVC%20V2%20280E.zip?download=true'
+  ismo:
+    piper: {voice: fi_FI-harri-medium, speed: 1.0}
+    cloud: {speed: 1.0}
+    kokoro: {voice: jm_kumo, speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/ismo/ismo_200e_57400s.pth,
+          index: /home/haama/TTS-bot/rvc_models/ismo/ismo.index,
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: rmvpe,
+          speaker_id: 0}
+    tts_provider: piper
+  seppo:
+    piper: {voice: fi_FI-harri-medium, speed: 1.0}
+    cloud: {speed: 1.0}
+    kokoro: {voice: jm_kumo, speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/seppo/seppo_100e_9900s.pth,
+          index: /home/haama/TTS-bot/rvc_models/seppo/seppo.index,
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: rmvpe,
+          speaker_id: 0}
+    tts_provider: piper
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Arnold (English) [RVC v3] [200] [600 Epochs]'
+  arnold:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/schwarzenegger_e300_s27600/Schwarzenegger_e300_s27600.pth,
+          index: /home/haama/TTS-bot/rvc_models/schwarzenegger_e300_s27600/added_IVF1992_Flat_nprobe_1_Schwarzenegger_v2.index,
+          pitch: -3,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Arnold Schwarzenegger [RVC V2] [300 Epochs]'
+  homer:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/homersimpson_550e_17600s/HomerSimpson_550e_17600s.pth,
+          index: /home/haama/TTS-bot/rvc_models/homersimpson_550e_17600s/HomerSimpson.index,
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Homer Simpson (The Simpsons. 550 Epochs, Rmvpe)'
+  marge:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    kokoro: {voice: af_heart, speed: 0.8}
+    rvc: {model: /home/haama/TTS-bot/rvc_models/margesimpson/MargeSimpson.pth,
+          index: /home/haama/TTS-bot/rvc_models/margesimpson/added_IVF773_Flat_nprobe_1_MargeSimpson_v2.index,
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Marge Simpson (The Simpsons: Hit & Run) (RVMPE 40k) (200 epochs)'

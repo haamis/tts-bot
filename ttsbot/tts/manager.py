@@ -62,9 +62,19 @@ class TTSManager:
         output_path = str(output_path)
         note = None
 
-        tiers = [self._try_remote_kokoro, self._try_kokoro, self._try_cloud]
-        if self.cloud_first:
-            tiers = [self._try_cloud, self._try_remote_kokoro, self._try_kokoro]
+        # Determine tier order based on voice_cfg.tts_provider
+        provider = getattr(voice_cfg, 'tts_provider', 'auto')
+        if provider == "piper":
+            tiers = []
+        elif provider == "kokoro":
+            tiers = [self._try_remote_kokoro, self._try_kokoro]
+        elif provider == "cloud":
+            tiers = [self._try_cloud]
+        else:  # "auto"
+            tiers = [self._try_remote_kokoro, self._try_kokoro, self._try_cloud]
+            if self.cloud_first:
+                tiers = [self._try_cloud, self._try_remote_kokoro, self._try_kokoro]
+
         for tier in tiers:
             result, note = await tier(text, output_path, voice_cfg, note)
             if result is not None:
@@ -180,6 +190,8 @@ def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
             server_url=server_url,
             server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
             server_timeout=float(env.get("RVC_GPU_SERVER_TIMEOUT", 900)),
+            wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
+            wol_broadcast=env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
         )
 
     cloud = None

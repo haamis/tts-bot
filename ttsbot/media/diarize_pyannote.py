@@ -1,25 +1,31 @@
 """pyannote diarization engine for multi-voice !rvc.
 
-Runs pyannote's speaker-diarization-3.1 pipeline (neural segmentation at
+Runs pyannote's speaker diarization pipeline (neural segmentation at
 16ms resolution + hidden-state clustering) and converts its output into the
 same Segment/assignment pipeline the local engine feeds: cluster f0s,
 pitch-ranked voice assignment, gap absorption, timeline rebuild all stay
-shared with ttsbot/media/diarize.py.
+shared with ttsbot_diarize.diarize.
 
 The model is gated on HuggingFace: accept the conditions on
-pyannote/segmentation-3.0 and pyannote/speaker-diarization-3.1, create a
-token at hf.co/settings/tokens and put it in .env as HF_TOKEN. Failures
+pyannote/segmentation-3.0 and pyannote/speaker-diarization-3.1 (v3) or
+pyannote/speaker-diarization-community-1 (v4), create a token at
+hf.co/settings/tokens and put it in .env as HF_TOKEN. Failures
 (no token, import, download) raise; the caller falls back to the local
 engine. Weights (~20MB + embedding model) download once and are cached in
 ~/.cache/huggingface; the pipeline loads lazily per command.
+
+Supports both pyannote.audio 3.x (model_id=pyannote/speaker-diarization-3.1)
+and 4.x (model_id=pyannote/speaker-diarization-community-1). The 4.x pipeline
+uses `token` instead of `use_auth_token` and supports `min_speakers`/`max_speakers`.
 """
 import logging
+import os
 import threading
 
 import numpy as np
 
-from ttsbot.media.audio import load_mono, resample
-from ttsbot.media.diarize import (
+from ttsbot_diarize.audio import load_mono, resample
+from ttsbot_diarize.diarize import (
     MIN_SEGMENT_S,
     MIN_SPEAKER_FRAC,
     MIN_SPEAKER_S,
@@ -35,10 +41,13 @@ from ttsbot.media.diarize import (
 
 log = logging.getLogger("ttsbot.media.diarize.pyannote")
 
-MODEL_ID = "pyannote/speaker-diarization-3.1"
+# Model ID can be overridden via env var. Defaults to pyannote 4.x community model.
+# For pyannote 3.x, use: pyannote/speaker-diarization-3.1
+MODEL_ID = os.environ.get("PYANNOTE_MODEL_ID", "pyannote/speaker-diarization-community-1")
 
 _PIPELINE = None
 _INIT_LOCK = threading.Lock()
+_PYANNOTE_VERSION = None  # cached version detection
 
 
 def resolve_device(device: str) -> str:
@@ -48,6 +57,22 @@ def resolve_device(device: str) -> str:
 
         return "cuda" if torch.cuda.is_available() else "cpu"
     return device
+
+
+def _detect_pyannote_version() -> int:
+    """Detect major version of installed pyannote.audio (3 or 4)."""
+    global _PYANNOTE_VERSION
+    if _PYANNOTE_VERSION is not None:
+        return _PYANNOTE_VERSION
+    try:
+        import pyannote.audio
+        version_str = pyannote.audio.__version__
+        major = int(version_str.split(".")[0])
+        _PYANNOTE_VERSION = major
+        return major
+    except Exception:
+        _PYANNOTE_VERSION = 3  # safe default
+        return 3
 
 
 def _get_pipeline(hf_token: str, device: str):
@@ -64,7 +89,15 @@ def _get_pipeline(hf_token: str, device: str):
             raise RuntimeError("HF_TOKEN not set (pyannote models are gated)")
         from pyannote.audio import Pipeline
 
-        pipeline = Pipeline.from_pretrained(MODEL_ID, use_auth_token=hf_token)
+        version = _detect_pyannote_version()
+        log.info("Loading pyannote v%d pipeline: %s", version, MODEL_ID)
+
+        # API changed in 4.x: use_auth_token -> token
+        if version >= 4:
+            pipeline = Pipeline.from_pretrained(MODEL_ID, token=hf_token)
+        else:
+            pipeline = Pipeline.from_pretrained(MODEL_ID, use_auth_token=hf_token)
+
         target = resolve_device(device)
         if target != "cpu":
             import torch
@@ -81,11 +114,31 @@ def annotation_to_segments(annotation, max_speakers: int) -> list[Segment]:
     resolved first-come: a region claimed by an earlier speaker keeps it,
     fully-covered later regions are dropped — downstream expects one
     speaker per moment.
+
+    Supports both pyannote 3.x (Annotation with itertracks) and 4.x
+    (DiarizeOutput with speaker_diarization). For 4.x, prefers
+    exclusive_speaker_diarization (non-overlapping turns) when available.
     """
     label_of: dict[str, int] = {}
     raw: list[tuple[float, float, str]] = []
-    for region, _track, label in annotation.itertracks(yield_label=True):
-        raw.append((float(region.start), float(region.end), str(label)))
+
+    # pyannote 4.x returns DiarizeOutput with exclusive_speaker_diarization
+    # (non-overlapping, better for ASR alignment) and speaker_diarization
+    if hasattr(annotation, "exclusive_speaker_diarization") and annotation.exclusive_speaker_diarization:
+        log.debug("Using exclusive_speaker_diarization (non-overlapping turns)")
+        for turn, label in annotation.exclusive_speaker_diarization:
+            raw.append((float(turn.start), float(turn.end), str(label)))
+    # pyannote 4.x returns DiarizeOutput with speaker_diarization iterable
+    elif hasattr(annotation, "speaker_diarization"):
+        for turn, label in annotation.speaker_diarization:
+            raw.append((float(turn.start), float(turn.end), str(label)))
+    # pyannote 3.x returns Annotation with itertracks
+    elif hasattr(annotation, "itertracks"):
+        for region, _track, label in annotation.itertracks(yield_label=True):
+            raw.append((float(region.start), float(region.end), str(label)))
+    else:
+        raise TypeError(f"Unknown pyannote output type: {type(annotation)}")
+
     raw.sort(key=lambda t: (t[0], t[1]))
     for _s, _e, label in raw:
         if label not in label_of:
@@ -146,17 +199,31 @@ def analyze_media_pyannote(
 
     t0 = time.time()
     k = num_voices
+    version = _detect_pyannote_version()
     if run_fn is None:
         pipeline = _get_pipeline(hf_token, device)
 
         def _run(wav_path: str, **kwargs):
+            # pyannote 4.x defaults to torchcodec for audio loading, which has
+            # compatibility issues with torch 2.8+. Load with torchaudio and pass
+            # waveform dict instead.
+            if version >= 4:
+                import torchaudio
+                waveform, sample_rate = torchaudio.load(wav_path)
+                return pipeline({"waveform": waveform, "sample_rate": sample_rate}, **kwargs)
             return pipeline(wav_path, **kwargs)
 
         run_fn = _run
+    # In 4.x, prefer min_speakers/max_speakers over num_speakers for flexibility
+    if threshold <= 0:
+        # Caller asserts exact count
+        kwargs = {"num_speakers": k} if version < 4 else {"min_speakers": k, "max_speakers": k}
+    else:
+        # Let pyannote find natural count; optionally bound by voices
+        kwargs = {} if version < 4 else {"max_speakers": k}
 
-    kwargs = {"num_speakers": k} if threshold <= 0 else {}
     annotation = run_fn(path, **kwargs)
-    log.info("pyannote diarization took %.1fs", time.time() - t0)
+    log.info("pyannote v%d diarization took %.1fs", version, time.time() - t0)
 
     segments = annotation_to_segments(annotation, k)
     if not segments:
