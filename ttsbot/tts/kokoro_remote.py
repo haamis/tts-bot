@@ -12,7 +12,7 @@ from pathlib import Path
 
 import aiohttp
 
-from ttsbot.network import send_wol
+from ttsbot.network import ensure_awake
 from ttsbot.rvc.runner import PROTOCOL_HEADER, PROTOCOL_VERSION
 
 log = logging.getLogger("ttsbot.tts.kokoro_remote")
@@ -44,10 +44,6 @@ class KokoroRemoteRunner:
         if server_token:
             self._headers["Authorization"] = f"Bearer {server_token}"
 
-    def _maybe_wol(self) -> None:
-        if self.server_url and self.wol_mac:
-            send_wol(self.wol_mac, self.wol_broadcast)
-
     async def synthesize(
         self, voice: str, text: str, output_path: str | Path, speed: float = 1.0
     ) -> str:
@@ -63,7 +59,7 @@ class KokoroRemoteRunner:
         try:
             timeout = aiohttp.ClientTimeout(total=self.server_timeout)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
-                self._maybe_wol()
+                await ensure_awake(self.server_url, self.wol_mac, self.wol_broadcast)
                 async with sess.post(
                     self.server_url + "/tts", data=form, headers=self._headers
                 ) as resp:

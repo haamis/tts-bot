@@ -15,7 +15,7 @@ from pathlib import Path
 import aiohttp
 
 from ttsbot.media.diarize import DiarizationAnalysis, Segment
-from ttsbot.network import send_wol
+from ttsbot.network import ensure_awake
 from ttsbot.rvc.runner import PROTOCOL_HEADER, PROTOCOL_VERSION
 
 log = logging.getLogger("ttsbot.media.diarize_remote")
@@ -40,8 +40,7 @@ async def diarize_remote(
     wol_mac: str = "",
     wol_broadcast: str = "255.255.255.255",
 ) -> DiarizationAnalysis:
-    if wol_mac:
-        send_wol(wol_mac, wol_broadcast)
+    await ensure_awake(server_url, wol_mac, wol_broadcast)
     headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
     if server_token:
         headers["Authorization"] = f"Bearer {server_token}"

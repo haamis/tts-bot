@@ -122,6 +122,24 @@ def test_remote_success_writes_wav(tmp_path, fake_http):
     assert headers["Authorization"] == "Bearer sekret"
 
 
+def test_remote_convert_awaits_wake(tmp_path, fake_http, monkeypatch):
+    src = _sine_wav(tmp_path / "in.wav")
+    fake_http.body = _sine_bytes()
+    calls = []
+
+    async def fake_awake(url, mac, broadcast="255.255.255.255", timeout=60):
+        calls.append((url, mac, broadcast))
+        return True
+
+    monkeypatch.setattr("ttsbot.rvc.runner.ensure_awake", fake_awake)
+    r = _runner(tmp_path, server_url="http://gpu:8001", wol_mac="AA-BB-CC-DD-EE-FF")
+
+    import asyncio
+
+    asyncio.run(r.convert(src, tmp_path / "out.wav", model_path="x", index_path=None))
+    assert calls == [("http://gpu:8001", "aa:bb:cc:dd:ee:ff", "255.255.255.255")]
+
+
 def test_remote_4xx_fails_fast_without_fallback(tmp_path, fake_http):
     src = _sine_wav(tmp_path / "in.wav")
     fake_http.status = 400

@@ -5,6 +5,10 @@ services:
       dockerfile: Dockerfile
     container_name: tts-bot
     restart: unless-stopped
+    # Host networking: a Wake-on-LAN magic packet must originate on the LAN
+    # interface. From a bridged container the broadcast dies at the host (the
+    # kernel does not forward it), so the bot's automatic wakes silently fail.
+    network_mode: host
     env_file:
       - .env
     extra_hosts:

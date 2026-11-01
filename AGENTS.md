@@ -112,6 +112,15 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
   reprovisioning, or WoL wakes a host whose GPU path is dead. The server maps
   CUDA busy/unavailable to 503 (transient), so the client falls back locally
   instead of failing the request.
+- **The bot container must use `network_mode: host`** (`docker-compose.yml`):
+  a magic packet sent from a bridged container reaches the host but is never
+  forwarded to the LAN — every automatic wake silently failed while manual
+  host-side WoL worked. `extra_hosts` still applies in host mode. Waking is
+  handled by `ensure_awake()` in `ttsbot/network.py` (probe `/health`, send
+  WoL, poll up to 60s) before the remote request, so the waking command still
+  uses the GPU. A timed-out wake is cached for 5 minutes — without it every
+  remote call in one multi-voice `!rvc` pays the full timeout when the host
+  cannot be woken.
 - `!rvc` extracts the first http(s) URL from the argument (`TTSBot._extract_url`) —
   users paste whole command strings into the URL field; that self-heals. No URL
   found -> the argument text is used as a yt-dlp `ytsearch1:` query instead

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiohttp
 
-from ttsbot.network import send_wol
+from ttsbot.network import ensure_awake
 
 log = logging.getLogger("ttsbot.rvc")
 
@@ -60,11 +60,6 @@ class RvcRunner:
         # Last worker ready-handshake ({"device": ..., "threads": ...});
         # the GPU server surfaces it via /health.
         self.worker_info: dict = {}
-
-    def _maybe_wol(self) -> None:
-        """Send WOL packet if configured and we're using a remote server."""
-        if self.server_url and self.wol_mac:
-            send_wol(self.wol_mac, self.wol_broadcast)
 
     async def convert(
         self,
@@ -148,7 +143,7 @@ class RvcRunner:
         if not target_voice_path.exists():
             raise RuntimeError(f"Target voice reference not found: {target_voice_path}")
 
-        self._maybe_wol()
+        await ensure_awake(self.server_url, self.wol_mac, self.wol_broadcast)
         headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
         if self.server_token:
             headers["Authorization"] = f"Bearer {self.server_token}"
@@ -216,7 +211,7 @@ class RvcRunner:
         (5xx, timeout, connection error) -> WorkerCrashed so the caller
         degrades to the local CPU worker with identical retry semantics.
         """
-        self._maybe_wol()
+        await ensure_awake(self.server_url, self.wol_mac, self.wol_broadcast)
         headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
         if self.server_token:
             headers["Authorization"] = f"Bearer {self.server_token}"

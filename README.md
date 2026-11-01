@@ -310,6 +310,15 @@ With a GPU desktop on the LAN, RVC conversion moves off the thin client:
 - **Thin client**: set `RVC_GPU_SERVER_URL=http://<desktop>:8001`
   (+ optional `RVC_GPU_SERVER_TOKEN`). The bot uploads each turn/segment
   and plays back the returned wav.
+- **Wake-on-LAN**: with `RVC_GPU_SERVER_WOL_MAC` set, the clients probe
+  `/health`, send a magic packet when the desktop is down, and wait up to
+  60s for it before the request — so the command that wakes it still runs on
+  the GPU instead of falling back. A wake that times out is not retried for
+  5 minutes, so a host that cannot be woken (powered off at the wall, WoL not
+  armed) falls back fast instead of stalling every call. The bot container
+  runs with `network_mode: host`: a bridged container's broadcast never
+  leaves the host (the kernel does not forward it), which silently broke
+  every automatic wake.
 - **Models**: the bot host owns the canonical `rvc_models/<voice>/` dirs.
   `tools/rvc_models.py` mirrors each voice to the desktop at the same
   absolute path (see "Adding voices"), so the client's paths resolve
