@@ -979,8 +979,9 @@ class TTSBot(commands.Bot):
         segments+f0s (analysis) and voice assignment stays local (needs the
         thin client's pitch profiles). Deterministic data errors (400, e.g.
         "no speech detected") propagate — the local engine would just raise
-        the same error on the same audio. Transport/5xx errors fall back to
-        the local engines below.
+        the same error on the same audio. Pyannote's "no speech regions" can
+        fall back to energy-based detection unless pyannote is pinned.
+        Transport/5xx errors fall back to the local engines below.
 
         RVC_DIARIZE_ENGINE: "auto" prefers pyannote when HF_TOKEN is set and
         falls back to the local engine on environment failures (missing
@@ -1016,11 +1017,17 @@ class TTSBot(commands.Bot):
                 return diarize.finalize_result(
                     analysis, source_path, voice_names, voice_f0
                 )
-            except ValueError:
-                # Data errors ("no speech detected", "no sustained speech")
-                # are engine-independent — don't rerun the local engine on
-                # the same doomed audio.
-                raise
+            except ValueError as e:
+                # "no speech regions" is pyannote-specific VAD failure;
+                # local engine uses different VAD (energy-based) and may work.
+                if engine != "pyannote" and "no speech region" in str(e).lower():
+                    log.warning("remote diarization found no speech regions (%s); using local engine", e)
+                    resolved = "local"
+                else:
+                    # Data errors ("no speech detected", "no sustained speech")
+                    # are engine-independent — don't rerun the local engine on
+                    # the same doomed audio.
+                    raise
             except Exception as e:
                 log.warning("remote diarization failed (%s); using local engine", e)
         use_pyannote = resolved == "pyannote"

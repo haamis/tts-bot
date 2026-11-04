@@ -204,6 +204,39 @@ def test_diarize_remote_400_no_local_retry(tmp_path, fake_http, monkeypatch):
         asyncio.run(TTSBot._diarize(ns, src, ["a"], {"a": 200.0}, _noop_status))
 
 
+@pytest.mark.parametrize("engine", ["local", "auto"])
+def test_diarize_remote_400_no_speech_regions_falls_back_local(tmp_path, fake_http, monkeypatch, engine):
+    src = _sine_wav(tmp_path / "in.wav")
+    fake_http.status = 400
+    fake_http.body = b'pyannote returned no speech regions'
+
+    sentinel = object()
+    monkeypatch.setattr(diarize, "diarize_media", lambda *a, **k: sentinel)
+    from ttsbot.media import diarize_pyannote
+
+    def fail_pyannote(*args, **kwargs):
+        raise AssertionError("must not retry the failed VAD")
+
+    monkeypatch.setattr(diarize_pyannote, "diarize_media_pyannote", fail_pyannote)
+    ns = _ns(RVC_GPU_SERVER_URL="http://gpu:8001", RVC_DIARIZE_ENGINE=engine, HF_TOKEN="test")
+    result = asyncio.run(TTSBot._diarize(ns, src, ["a"], {"a": 200.0}, _noop_status))
+    assert result is sentinel
+
+
+def test_diarize_pinned_pyannote_no_speech_regions_fails(tmp_path, fake_http, monkeypatch):
+    src = _sine_wav(tmp_path / "in.wav")
+    fake_http.status = 400
+    fake_http.body = b"pyannote returned no speech regions"
+
+    def fail_local(*args, **kwargs):
+        raise AssertionError("pinned engine must not fall back")
+
+    monkeypatch.setattr(diarize, "diarize_media", fail_local)
+    ns = _ns(RVC_GPU_SERVER_URL="http://gpu:8001", RVC_DIARIZE_ENGINE="pyannote")
+    with pytest.raises(ValueError, match="no speech regions"):
+        asyncio.run(TTSBot._diarize(ns, src, ["a"], {"a": 200.0}, _noop_status))
+
+
 def test_diarize_remote_500_falls_back_local(tmp_path, fake_http, monkeypatch):
     src = _sine_wav(tmp_path / "in.wav")
     fake_http.status = 503

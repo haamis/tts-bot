@@ -9,6 +9,14 @@ Discord bot: multi-turn dialogue TTS with RVC voice conversion. `!speak %voice t
 Python 3.12, CPU-only bot host (4C/8T, 16GB RAM, AMD 2400GE thin client).
 GPU inference runs on ifrit (RTX 2060, 6GB) via the Dockerized server.
 
+**Deployment boundary:** this host is **boksi**, the CPU-only bot host. The live
+bot is Docker container `tts-bot` (`docker-compose.yml`), NOT a host venv process.
+GPU server `rvc-server` runs on **ifrit**, `192.168.1.162`, from
+`~/rvc-gpu-server`. Check the configured remote URL or SSH to ifrit; inspecting
+localhost's CUDA says nothing about the GPU server. Never install NVIDIA drivers
+or start a GPU server on boksi. Rebuild/recreate Docker to deploy code; `restart`
+does not pick up a new image or changed `.env`. Venv is for local tests only.
+
 ## Commands
 
 ```bash
@@ -32,7 +40,7 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 | `ttsbot/tts/openrouter_tts.py` | OpenRouter `/audio/speech` client (pcm -> WAV wrap) |
 | `ttsbot/tts/piper_runner.py` | local Piper; anchored model paths; `--length-scale 1/speed` |
 | `ttsbot/rvc/runner.py` | worker client + subprocess fallback; `RVCRequestError` vs `WorkerCrashed` |
-| `rvc-gpu-server/` (submodule) | desktop FastAPI server: `/health`, `/convert`, `/diarize`, `/tts`, `/chatterbox`, `/vc`, `/whisperx`; Docker via `compose.yaml` (CPU) / `compose.gpu.yaml`; assets bind-mounted; protocol `X-RVC-Protocol: 1` |
+| `rvc-gpu-server/` (submodule) | desktop FastAPI server: `/health`, `/convert`, `/diarize`, `/separate`, `/tts`, `/chatterbox`, `/vc`, `/whisperx`; Docker via `compose.yaml` (CPU) / `compose.gpu.yaml`; assets bind-mounted; protocol `X-RVC-Protocol: 1` |
 | `ttsbot/rvc/worker.py` | persistent RVC worker (JSON lines on stdin/stdout) |
 | `ttsbot/media/ytdlp_runner.py` | yt-dlp probe/download + duration cap |
 | `ttsbot/media/diarize.py` | Multi-voice `!rvc` diarization: wav2vec2 embeddings -> clustering -> pitch-ranked voice assignment; `tools/analyze_voices.py` builds `config/voice_pitch.json` |

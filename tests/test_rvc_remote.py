@@ -100,6 +100,45 @@ def _runner(tmp_path, **kw):
 # ---- runner: remote transport ----
 
 
+@pytest.mark.parametrize("status", [404, 503])
+async def test_separation_fallback_runs_pymss_worker(tmp_path, fake_http, status):
+    fake_http.status = status
+    fake_http.body = b"unavailable"
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "pymss_webui.py").write_text(
+        "import json, shutil, sys\n"
+        "from pathlib import Path\n"
+        "def _pymss_worker_main(request_path):\n"
+        "    assert len(sys.argv) == 1\n"
+        "    request = json.loads(Path(request_path).read_text())\n"
+        "    for key in ('desired_root', 'secondary_root'):\n"
+        "        root = Path(request[key]); root.mkdir()\n"
+        "        shutil.copyfile(request['input_paths'][0], root / 'stem.wav')\n"
+        "    return 0\n"
+    )
+    src = _sine_wav(tmp_path / "in.wav")
+    vocals, instrumental = tmp_path / "vocals.wav", tmp_path / "instrumental.wav"
+    runner = _runner(tmp_path, server_url="http://gpu:8001")
+    assert await runner.separate_vocals(src, vocals, instrumental) == (str(vocals), str(instrumental))
+    assert vocals.read_bytes() == instrumental.read_bytes() == (tmp_path / "in.wav").read_bytes()
+    assert runner.last_via == "subprocess"
+
+
+async def test_separation_auth_failure_does_not_fall_back(tmp_path, fake_http, monkeypatch):
+    fake_http.status = 401
+    fake_http.body = b"unauthorized"
+    runner = _runner(tmp_path, server_url="http://gpu:8001")
+
+    async def fail_local(*args):
+        raise AssertionError("authentication errors must not fall back")
+
+    monkeypatch.setattr(runner, "_separate_local", fail_local)
+    src = _sine_wav(tmp_path / "in.wav")
+    with pytest.raises(RVCRequestError, match="HTTP 401"):
+        await runner.separate_vocals(src, tmp_path / "vocals.wav", tmp_path / "instrumental.wav")
+
+
 def test_remote_success_writes_wav(tmp_path, fake_http):
     src = _sine_wav(tmp_path / "in.wav")
     out = tmp_path / "out.wav"
@@ -228,4 +267,3 @@ def test_gpu_server_env_parsing(monkeypatch):
     assert env["RVC_GPU_SERVER_URL"] == "http://gpu:8001"
     assert env["RVC_GPU_SERVER_TOKEN"] == "abc"
     assert env["RVC_GPU_SERVER_TIMEOUT"] == 60.0
-

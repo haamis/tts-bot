@@ -248,6 +248,11 @@ class RvcRunner:
                     self.server_url + "/separate", data=form, headers=headers
                 ) as resp:
                     body = await resp.read()
+                    if resp.status == 404:
+                        # Endpoint not implemented on server — transient, fall back to local
+                        raise WorkerCrashed(
+                            f"GPU server separation endpoint not found (HTTP 404)"
+                        )
                     if 400 <= resp.status < 500:
                         raise RVCRequestError(
                             f"GPU server rejected separation (HTTP {resp.status}): "
@@ -290,7 +295,6 @@ class RvcRunner:
 
         import tempfile
         import json
-        import subprocess
 
         with tempfile.TemporaryDirectory() as tmpdir:
             request_path = Path(tmpdir) / "request.json"
@@ -314,7 +318,10 @@ class RvcRunner:
             )
 
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-u", str(worker_script),
+                sys.executable, "-u", "-c",
+                "import sys; request_path = sys.argv[1]; sys.argv[:] = [sys.argv[0]]; "
+                "from tools.pymss_webui import _pymss_worker_main; "
+                "raise SystemExit(_pymss_worker_main(request_path))",
                 str(request_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
