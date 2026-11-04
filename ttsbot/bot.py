@@ -182,6 +182,9 @@ class TTSBot(commands.Bot):
         elif message.content == f"{prefix}rvc" or message.content.startswith(f"{prefix}rvc "):
             await self._handle_rvc_prefix(message)
             return
+        elif message.content == f"{prefix}rsing" or message.content.startswith(f"{prefix}rsing "):
+            await self._handle_rsing_prefix(message)
+            return
         elif message.content == f"{prefix}generate" or message.content.startswith(f"{prefix}generate "):
             await self._handle_generate_prefix(message)
             return
@@ -256,6 +259,26 @@ class TTSBot(commands.Bot):
         url = parts[1].strip()
         status = await message.reply("⏳ Downloading audio...")
         await self._process_rvc(message.channel, message.author, message.guild, voices, url, status=status)
+
+    async def _handle_rsing_prefix(self, message: discord.Message):
+        argstr = message.content[len(self.env["COMMAND_PREFIX"]) + 6:].strip()
+        parts = argstr.split(None, 1)
+        if len(parts) < 2:
+            await message.reply(
+                "Usage: `!rsing <voice[,voice2,...]> <url or search terms>` e.g. "
+                "`!rsing snake https://youtube.com/watch?v=...`, "
+                "`!rsing snake never gonna give you up`, or "
+                "`!rsing trump,snake <two-singer video>` (speakers detected by pitch)"
+            )
+            return
+        voices = self._resolve_voice_spec(parts[0])
+        if voices is None:
+            known = ", ".join(sorted(self.config.voices))
+            await message.reply(f"❌ Unknown voice in '{parts[0]}'. Known voices: {known}")
+            return
+        url = parts[1].strip()
+        status = await message.reply("⏳ Downloading audio...")
+        await self._process_rsing(message.channel, message.author, message.guild, voices, url, status=status)
 
     async def _handle_generate_prefix(self, message: discord.Message):
         argstr = message.content[len(self.env["COMMAND_PREFIX"]) + 9:].strip()
@@ -420,6 +443,22 @@ class TTSBot(commands.Bot):
             return
         await self._process_rvc(interaction.channel, interaction.user, interaction.guild, voices, url, status=status)
 
+    @app_commands.command(name="rsing", description="Extract vocals from a song, convert with RVC, and restitch")
+    @app_commands.describe(
+        voice="RVC voice(s); comma-separated for multi-singer (e.g. trump,snake)",
+        url="Video/audio URL, or search terms to find it on YouTube",
+    )
+    @app_commands.autocomplete(voice=_voice_autocomplete)
+    async def rsing_slash(self, interaction: discord.Interaction, voice: str, url: str):
+        await interaction.response.defer()
+        status = await interaction.followup.send("⏳ Downloading audio...", wait=True)
+        voices = self._resolve_voice_spec(voice)
+        if voices is None:
+            known = ", ".join(sorted(self.config.voices))
+            await status.edit(content=f"❌ Unknown voice in '{voice}'. Known voices: {known}")
+            return
+        await self._process_rsing(interaction.channel, interaction.user, interaction.guild, voices, url, status=status)
+
     @app_commands.command(name="generate", description="LLM writes a monologue or multi-voice dialogue, then plays it")
     @app_commands.describe(
         voice="RVC voice(s); comma-separated for a dialogue (e.g. trump,snake)",
@@ -548,8 +587,9 @@ class TTSBot(commands.Bot):
                 try:
                     await self.player.connect(voice_channel)
                     if diar_result is not None:
+                        voice_names = ", ".join(voices)
                         await set_status(
-                            f"🔊 Playing {diar_result.detected}-speaker conversion..."
+                            f"🔊 Playing {diar_result.detected}-speaker ({voice_names}) conversion..."
                         )
                     else:
                         await set_status(f"🔊 Playing **{voices[0]}** conversion...")
@@ -572,6 +612,315 @@ class TTSBot(commands.Bot):
             finally:
                 if not keep_files:
                     shutil.rmtree(workdir, ignore_errors=True)
+
+    async def _process_rsing(
+        self,
+        channel: discord.abc.Messageable,
+        author: discord.User | discord.Member,
+        guild: discord.Guild | None,
+        voices: list[str],
+        url: str,
+        status: discord.Message | None = None,
+    ):
+        set_status = self._status_editor(status)
+
+        query = url.strip()
+        ext_url = self._extract_url(url)
+        if ext_url is None:
+            # No URL in the argument -> treat the text as a search query
+            if not query:
+                await set_status("❌ Nothing to search for. Usage: `!rsing <voice[,voice2,...]> <url or search terms>`")
+                return
+            await set_status(f"🔎 Searching for **{query}**...")
+            found = await self.ytdlp.search(query)
+            if found is None:
+                await set_status(f"❌ No results found for '{query}'.")
+                return
+            ext_url, title = found
+            await set_status(f"🔎 Found: **{title}**")
+        url = ext_url
+
+        voice_cfgs = [self.config.get_voice(v) for v in voices]
+        if any(cfg is None for cfg in voice_cfgs):
+            known = ", ".join(sorted(self.config.voices))
+            await set_status(f"❌ Unknown voice. Known voices: {known}")
+            return
+
+        if any(not cfg.rvc_model or not Path(cfg.rvc_model).exists() for cfg in voice_cfgs):
+            missing = [cfg.name for cfg in voice_cfgs if not cfg.rvc_model or not Path(cfg.rvc_model).exists()]
+            await set_status(f"❌ Voice(s) {', '.join(missing)} have no RVC model configured.")
+            return
+
+        if not guild:
+            await set_status("❌ This command must be used in a server.")
+            return
+
+        voice_channel = await ensure_voice_channel(
+            type("ctx", (), {"author": author, "guild": guild})(),
+            self,
+        )
+        if not voice_channel:
+            await set_status("❌ You must be in a voice channel.")
+            return
+
+        duration = await self.ytdlp.probe(url)
+        if duration is not None and duration > self.ytdlp.max_duration:
+            await set_status(
+                f"❌ Video is {self._fmt_duration(duration)} long; the limit is "
+                f"{self._fmt_duration(self.ytdlp.max_duration)}."
+            )
+            return
+        dur_note = f" ({self._fmt_duration(duration)})" if duration else ""
+        if duration is not None:
+            await set_status(f"⏳ Downloading audio{dur_note}...")
+
+        workdir = self.pipeline.temp_dir / f"rsing_{uuid.uuid4().hex[:8]}"
+        keep_files = self.env["BOT_DRY_RUN"]
+
+        queued = self.pipeline.is_busy(guild.id, voice_channel.id)
+        if queued:
+            await set_status("⏳ Queued — waiting for the current request to finish...")
+        async with self.pipeline.channel_lock(guild.id, voice_channel.id):
+            if queued:
+                await set_status(f"⏳ Downloading audio{dur_note}...")
+            self.pipeline.clear_cancel(guild.id, voice_channel.id)
+            cancel = self.pipeline.cancel_event(guild.id, voice_channel.id)
+            try:
+                try:
+                    source_path = await self.ytdlp.download(url, workdir)
+                except YtdlpAuthError:
+                    log.warning("yt-dlp download blocked (login/age-gate): %s", url)
+                    await set_status(
+                        "❌ This video is age-restricted or needs a YouTube login, "
+                        "so I can't download it. Try a different video or an "
+                        "age-unrestricted upload."
+                    )
+                    return
+                except Exception as e:
+                    log.exception("yt-dlp download failed")
+                    await set_status(f"❌ Download failed: {e}")
+                    return
+
+                if cancel.is_set():
+                    raise RequestCancelled("cancelled")
+
+                if self.env["BOT_DRY_RUN"]:
+                    await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
+                    return
+
+                try:
+                    await set_status("⏳ Separating vocals from instrumental...")
+                    vocals_path = workdir / "vocals.wav"
+                    instrumental_path = workdir / "instrumental.wav"
+                    await self.pipeline.rvc.separate_vocals(
+                        source_path, vocals_path, instrumental_path
+                    )
+
+                    if len(voice_cfgs) == 1:
+                        # Single voice: convert entire vocals track
+                        await set_status(f"⏳ Converting vocals to **{voice_cfgs[0].name}**{dur_note}...")
+                        converted_vocals_path = workdir / "vocals_rvc.wav"
+                        primary_engine = self.env.get("RVC_ENGINE", "rvc")
+                        engines_to_try = fallback_chain(
+                            primary_engine,
+                            self.env.get("RVC_FALLBACK", "auto"),
+                            bool(voice_cfgs[0].reference_clip),
+                        )
+
+                        last_error = None
+                        for engine in engines_to_try:
+                            try:
+                                if engine == "chatterbox_vc":
+                                    if not voice_cfgs[0].reference_clip:
+                                        raise RuntimeError(f"Voice '{voice_cfgs[0].name}' has no reference_clip for Chatterbox-VC")
+                                    await self.pipeline.rvc.convert_vc(
+                                        input_path=str(vocals_path),
+                                        output_path=str(converted_vocals_path),
+                                        target_voice_path=voice_cfgs[0].reference_clip,
+                                    )
+                                else:
+                                    await self.pipeline.rvc.convert(
+                                        input_path=str(vocals_path),
+                                        output_path=str(converted_vocals_path),
+                                        model_path=voice_cfgs[0].rvc_model,
+                                        index_path=voice_cfgs[0].rvc_index,
+                                        pitch=voice_cfgs[0].pitch,
+                                        index_rate=voice_cfgs[0].index_rate,
+                                        f0_method=voice_cfgs[0].f0_method,
+                                        speaker_id=voice_cfgs[0].speaker_id,
+                                    )
+                                if engine != primary_engine:
+                                    await set_status(f"⚠️ Fallback to {engine}: {last_error}")
+                                break
+                            except Exception as e:
+                                if isinstance(e, RVCRequestError):
+                                    raise
+                                last_error = e
+                                log.warning("Engine %s failed for %s: %s", engine, voice_cfgs[0].name, e)
+                                continue
+                        else:
+                            raise RuntimeError(f"All VC engines failed for {voice_cfgs[0].name}: {last_error}")
+
+                    else:
+                        # Multi-voice: diarize clean vocals, convert per-speaker
+                        diar_result = await self._convert_multivoice_rsing(
+                            str(vocals_path), voice_cfgs, workdir, set_status, cancel=cancel
+                        )
+                        converted_vocals_path = workdir / "vocals_rvc.wav"
+
+                    await set_status("⏳ Mixing converted vocals with instrumental...")
+                    final_path = workdir / "converted.wav"
+                    await asyncio.to_thread(
+                        self._mix_vocals_instrumental,
+                        str(converted_vocals_path),
+                        str(instrumental_path),
+                        str(final_path),
+                    )
+
+                except RequestCancelled:
+                    raise
+                except Exception as e:
+                    log.exception("RVC conversion failed")
+                    await set_status(f"❌ Conversion failed: {e}")
+                    return
+
+                try:
+                    await self.player.connect(voice_channel)
+                    if len(voice_cfgs) == 1:
+                        await set_status(f"🔊 Playing **{voices[0]}** (rsing)...")
+                    else:
+                        voice_names = ", ".join(voices)
+                        await set_status(f"🔊 Playing {len(voice_cfgs)}-voice ({voice_names}) rsing...")
+                    await self.player.play_sequence(voice_channel, [str(final_path)], cancel=cancel)
+                    await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
+                except RequestCancelled:
+                    raise
+                except Exception as e:
+                    log.exception("RVC playback failed")
+                    await set_status(f"❌ Error: {e}")
+            except RequestCancelled:
+                log.info("Rsing request cancelled (guild %s)", guild.id)
+                await set_status("⏭ Skipped.")
+            finally:
+                if not keep_files:
+                    shutil.rmtree(workdir, ignore_errors=True)
+
+    async def _convert_multivoice_rsing(
+        self,
+        vocals_path: str,
+        voices: list,
+        workdir: Path,
+        set_status,
+        cancel: asyncio.Event | None = None,
+    ):
+        """Diarize clean vocals, convert each segment with assigned voice, reassemble."""
+        from ttsbot.media import diarize
+        profiles = diarize.load_profiles(PROJECT_ROOT / "config" / "voice_pitch.json")
+        voice_f0 = diarize.voice_f0_map(profiles, [c.name for c in voices])
+        await set_status("⏳ Detecting speakers in vocals...")
+        result = await self._diarize(vocals_path, [c.name for c in voices], voice_f0, set_status)
+        if cancel is not None and cancel.is_set():
+            raise RequestCancelled("cancelled")
+
+        notes = []
+        used = set(result.voice_of_cluster.values())
+        unused = [c.name for c in voices if c.name not in used]
+        if unused:
+            notes.append(
+                f"detected {result.detected} speaker(s) — using only {', '.join(sorted(used))}"
+            )
+        if result.detected > len(voices):
+            notes.append(
+                f"{result.detected} speakers share {len(used)} voice(s) by pitch "
+                "(more speakers than voices — add voices to separate them)"
+            )
+        unprofiled = [c.name for c in voices if voice_f0.get(c.name) is None]
+        if unprofiled:
+            notes.append(
+                f"no pitch profile for {', '.join(unprofiled)} (run tools/analyze_voices.py)"
+            )
+        note = f" ⚠️ {'; '.join(notes)}" if notes else ""
+        await set_status(
+            f"⏳ {result.detected} speaker(s) → {diarize.result_summary(result)}{note}"
+        )
+
+        await asyncio.to_thread(self._slice_segments, vocals_path, result, workdir)
+        total = len(result.segments)
+        slices = [workdir / f"seg_{i:03d}.wav" for i in range(total)]
+        outs: list = [None] * total
+
+        # Convert grouped by voice
+        names = [c.name for c in voices]
+        assigned = [
+            i for i in range(total)
+            if result.segments[i].cluster in result.voice_of_cluster
+        ]
+        order = sorted(
+            assigned,
+            key=lambda i: (names.index(result.voice_of_cluster[result.segments[i].cluster]), i),
+        )
+        for done, i in enumerate(order, start=1):
+            if cancel is not None and cancel.is_set():
+                raise RequestCancelled("cancelled")
+            cfg = next(
+                c for c in voices
+                if c.name == result.voice_of_cluster[result.segments[i].cluster]
+            )
+            try:
+                out_path = await self._convert_segment_with_fallback(
+                    segment_index=i,
+                    slice_path=slices[i],
+                    output_path=workdir / f"seg_{i:03d}_rvc.wav",
+                    cfg=cfg,
+                    set_status=set_status,
+                )
+                outs[i] = out_path
+            except Exception as e:
+                raise RuntimeError(f"segment {done}/{len(order)} ({cfg.name}) failed: {e}") from e
+            if done % 5 == 0 or done == len(order):
+                await set_status(f"⏳ Converting segment {done}/{len(order)}...")
+
+        # Rebuild converted vocals timeline
+        await asyncio.to_thread(
+            diarize.rebuild_timeline,
+            vocals_path,
+            result,
+            outs,
+            str(workdir / "vocals_rvc.wav"),
+        )
+        return result
+
+    @staticmethod
+    def _mix_vocals_instrumental(vocals_path: str, instrumental_path: str, output_path: str) -> None:
+        """Mix converted vocals with instrumental, aligning by duration."""
+        from ttsbot.media.audio import load_mono, resample, write_wav
+        import numpy as np
+
+        vocals, sr_v = load_mono(vocals_path)
+        instrumental, sr_i = load_mono(instrumental_path)
+
+        # Resample to the same rate (use the higher one)
+        target_sr = max(sr_v, sr_i)
+        if sr_v != target_sr:
+            vocals = resample(vocals, sr_v, target_sr)
+        if sr_i != target_sr:
+            instrumental = resample(instrumental, sr_i, target_sr)
+
+        # Align lengths: pad shorter with zeros
+        max_len = max(len(vocals), len(instrumental))
+        if len(vocals) < max_len:
+            vocals = np.pad(vocals, (0, max_len - len(vocals)))
+        if len(instrumental) < max_len:
+            instrumental = np.pad(instrumental, (0, max_len - len(instrumental)))
+
+        # Mix: vocals at full volume, instrumental at slightly reduced to let vocals shine
+        mixed = vocals + instrumental * 0.85
+        # Normalize to prevent clipping
+        peak = np.abs(mixed).max()
+        if peak > 1.0:
+            mixed = mixed / peak * 0.98
+
+        write_wav(output_path, mixed.astype(np.float32), target_sr)
 
     async def _convert_single(self, source_path: str, voice_cfg, workdir, dur_note, set_status, cancel: asyncio.Event | None = None) -> None:
         """Single-voice path: whole media through selected VC engine (RVC or Chatterbox-VC)."""

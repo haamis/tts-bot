@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import json
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -190,6 +192,165 @@ class RvcRunner:
             raise RuntimeError(f"GPU server returned empty audio")
         self.last_via = "remote"
         return str(output_path)
+
+    async def separate_vocals(
+        self,
+        input_path: str | Path,
+        vocals_path: str | Path,
+        instrumental_path: str | Path,
+        model: str = "vocals-bs-roformer-368",
+    ) -> tuple[str, str]:
+        """Separate vocals from instrumental using GPU server (/separate endpoint).
+
+        Returns (vocals_path, instrumental_path). Remote-first with local
+        subprocess fallback (PyMSS). 4xx = deterministic fail; 5xx/timeout =
+        transient -> local fallback.
+        """
+        input_path = Path(input_path)
+        vocals_path = Path(vocals_path)
+        instrumental_path = Path(instrumental_path)
+        vocals_path.parent.mkdir(parents=True, exist_ok=True)
+        instrumental_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if self.server_url:
+            try:
+                return await self._separate_remote(input_path, vocals_path, instrumental_path, model)
+            except RVCRequestError:
+                raise
+            except Exception as e:
+                log.warning(
+                    "GPU server separation failed (%s); using local slow path", e
+                )
+
+        # Local fallback: run PyMSS via subprocess
+        return await self._separate_local(input_path, vocals_path, instrumental_path, model)
+
+    async def _separate_remote(
+        self, input_path: Path, vocals_path: Path, instrumental_path: Path, model: str
+    ) -> tuple[str, str]:
+        await ensure_awake(self.server_url, self.wol_mac, self.wol_broadcast)
+        headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
+        if self.server_token:
+            headers["Authorization"] = f"Bearer {self.server_token}"
+        form = aiohttp.FormData()
+        form.add_field(
+            "audio",
+            input_path.read_bytes(),
+            filename=input_path.name,
+            content_type="audio/wav",
+        )
+        form.add_field("model", model)
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.server_timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as sess:
+                async with sess.post(
+                    self.server_url + "/separate", data=form, headers=headers
+                ) as resp:
+                    body = await resp.read()
+                    if 400 <= resp.status < 500:
+                        raise RVCRequestError(
+                            f"GPU server rejected separation (HTTP {resp.status}): "
+                            f"{body[:300].decode(errors='replace')}"
+                        )
+                    if resp.status != 200:
+                        raise WorkerCrashed(
+                            f"GPU server separation error (HTTP {resp.status}): "
+                            f"{body[:300].decode(errors='replace')}"
+                        )
+        except (RVCRequestError, WorkerCrashed):
+            raise
+        except asyncio.TimeoutError as e:
+            raise WorkerCrashed(f"GPU server separation timed out: {e}") from e
+        except Exception as e:
+            raise WorkerCrashed(f"GPU server separation unreachable: {e}") from e
+
+        import base64
+        import json
+        data = json.loads(body)
+        vocals_path.write_bytes(base64.b64decode(data["vocals_b64"]))
+        instrumental_path.write_bytes(base64.b64decode(data["instrumental_b64"]))
+
+        if not vocals_path.exists() or vocals_path.stat().st_size == 0:
+            raise RVCRequestError("GPU server returned empty vocals")
+        if not instrumental_path.exists() or instrumental_path.stat().st_size == 0:
+            raise RVCRequestError("GPU server returned empty instrumental")
+
+        self.last_via = "remote"
+        return str(vocals_path), str(instrumental_path)
+
+    async def _separate_local(
+        self, input_path: Path, vocals_path: Path, instrumental_path: Path, model: str
+    ) -> tuple[str, str]:
+        """Local PyMSS separation via subprocess (CPU fallback)."""
+        # Use the same worker script pattern as RVC worker, but for PyMSS
+        worker_script = self.rvc_root / "tools" / "pymss_webui.py"
+        if not worker_script.exists():
+            raise RuntimeError(f"PyMSS worker script not found: {worker_script}")
+
+        import tempfile
+        import json
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            request_path = Path(tmpdir) / "request.json"
+            request = {
+                "model_id": model,
+                "input_paths": [str(input_path)],
+                "output_format": "wav",
+                "desired_root": str(vocals_path.parent / "vocals_out"),
+                "secondary_root": str(instrumental_path.parent / "inst_out"),
+                "model_dtype": "float32",
+                "allow_fp32_retry": True,
+            }
+            request_path.write_text(json.dumps(request))
+
+            env = os.environ.copy()
+            existing = env.get("PYTHONPATH")
+            env["PYTHONPATH"] = str(self.rvc_root) + (os.pathsep + existing if existing else "")
+            env["RVC_WORKER_ROOT"] = str(self.rvc_root)
+            env["PYTHONWARNINGS"] = "ignore::FutureWarning" + (
+                "," + env["PYTHONWARNINGS"] if env.get("PYTHONWARNINGS") else ""
+            )
+
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-u", str(worker_script),
+                str(request_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=str(self.rvc_root),
+            )
+
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode not in (0, 75):  # 75 = FP32 retry exit code
+                err = stderr.decode().strip()
+                raise RuntimeError(f"PyMSS separation failed (exit {proc.returncode}): {err}")
+
+            # Find output files
+            desired_root = Path(request["desired_root"])
+            secondary_root = Path(request["secondary_root"])
+            vocals_out = None
+            inst_out = None
+            for f in desired_root.glob("*"):
+                if f.is_file():
+                    vocals_out = f
+                    break
+            for f in secondary_root.glob("*"):
+                if f.is_file():
+                    inst_out = f
+                    break
+
+            if not vocals_out or not inst_out:
+                raise RuntimeError("PyMSS separation produced no output files")
+
+            import shutil
+            shutil.copy2(vocals_out, vocals_path)
+            shutil.copy2(inst_out, instrumental_path)
+
+        self.last_via = "subprocess"
+        return str(vocals_path), str(instrumental_path)
 
     def _check_paths(self, model_path: str, index_path: str | None) -> None:
         if not (self.rvc_root / self.infer_script).exists():
