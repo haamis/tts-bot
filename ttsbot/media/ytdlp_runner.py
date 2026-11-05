@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 from pathlib import Path
 
 import soundfile as sf
@@ -70,7 +71,7 @@ class YtdlpRunner:
     def _probe_sync(self, url: str) -> float | None:
         opts = {
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
             "noprogress": True,
             "logger": _Logger(),
             "noplaylist": True,
@@ -104,7 +105,7 @@ class YtdlpRunner:
     def _search_sync(self, query: str) -> tuple[str, str] | None:
         opts = {
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
             "noprogress": True,
             "logger": _Logger(),
             "skip_download": True,
@@ -155,7 +156,7 @@ class YtdlpRunner:
             "outtmpl": str(output_dir / "source.%(ext)s"),
             "noplaylist": True,
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
             "noprogress": True,
             "logger": _Logger(),
             "match_filter": yt_dlp.utils.match_filter_func(
@@ -191,16 +192,18 @@ class YtdlpRunner:
             info = entries[0]
 
         path = self._result_path(info)
-        if path is not None and path.exists():
+        if path is not None and path.suffix.lower() == ".wav" and path.is_file():
             return path
 
-        files = list(output_dir.glob("source.*"))
-        if not files:
-            raise RuntimeError(
-                "yt-dlp produced no output (media may exceed the "
-                f"{self.max_duration // 60} minute limit, or the URL is unsupported)"
-            )
-        return files[0]
+        # FFmpegExtractAudio promises a WAV. Never return an arbitrary source.*
+        # file: it may be an interrupted .part download or stale source.webm.
+        path = output_dir / "source.wav"
+        if path.is_file():
+            return path
+        raise RuntimeError(
+            "yt-dlp produced no WAV output (media may exceed the "
+            f"{self.max_duration // 60} minute limit, or the URL is unsupported)"
+        )
 
     @staticmethod
     def _result_path(info: dict) -> Path | None:
@@ -215,6 +218,9 @@ class YtdlpRunner:
     @staticmethod
     def _duration(path: Path) -> float:
         try:
-            return sf.info(str(path)).duration
-        except Exception:
-            return 0.0
+            duration = sf.info(str(path)).duration
+        except Exception as e:
+            raise RuntimeError("Downloaded audio is unreadable") from e
+        if not math.isfinite(duration) or duration <= 0:
+            raise RuntimeError("Downloaded audio has no valid duration")
+        return duration

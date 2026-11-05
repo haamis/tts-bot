@@ -20,7 +20,15 @@ rvc-gpu-server
 # ttsbot-diarize (needed for ttsbot_diarize package)
 tests
 *.md
+.env
+.env.*
 !.env.example
+cookies.txt
+cookies.txt.*
+rvc_models
+piper_voices
+out
+tmp
 LICENSE
 MIT协议暨相关引用库协议
 go-*.bat

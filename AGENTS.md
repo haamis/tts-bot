@@ -178,6 +178,12 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 - `config/voices.yaml` is tuned live by the user (speed/pitch change often); tests
   assert structure, never tunable values.
 - `.env` holds real secrets — never print or commit it.
+- yt-dlp downloads must yield a completed WAV with a finite positive duration;
+  do not accept partial `source.*` files or hide audio-read failures as zero
+  duration. Keep extraction warnings visible for provider/auth diagnostics.
+- `httpx` is an explicit test dependency (OpenAI error fixtures use it); do not
+  rely on the SDK installing it transitively. Docker contexts exclude `.env`,
+  cookie exports and runtime voice models; RVC inference assets remain included.
 
 ## Conventions
 
