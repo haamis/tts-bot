@@ -1,5 +1,8 @@
 services:
   tts-bot:
+    build:
+      args:
+        MEDIA_REFRESH: ${MEDIA_REFRESH:-manual}
     logging:
       driver: json-file
       options:

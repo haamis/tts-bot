@@ -816,7 +816,7 @@ class TTSBot(commands.Bot):
         """Diarize clean vocals, convert each segment with assigned voice, reassemble."""
         from ttsbot.media import diarize
         profiles = diarize.load_profiles(PROJECT_ROOT / "config" / "voice_pitch.json")
-        voice_f0 = diarize.voice_f0_map(profiles, [c.name for c in voices])
+        voice_f0 = diarize.voice_f0_map(profiles, voices)
         await set_status("⏳ Detecting speakers in vocals...")
         result = await self._diarize(vocals_path, [c.name for c in voices], voice_f0, set_status)
         if cancel is not None and cancel.is_set():

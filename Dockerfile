@@ -52,4 +52,11 @@ RUN mkdir -p /app/rvc_models /app/temp
 ENV RVC_MODELS_DIR=/app/rvc_models \
     TEMP_DIR=/app/temp
 
+# Bust only the media dependency layer during scheduled maintenance. Rebuilding
+# unchanged requirements alone would otherwise reuse stale yt-dlp/plugin wheels.
+ARG MEDIA_REFRESH=manual
+LABEL homelab.media-refresh=true
+RUN echo "Media dependency refresh: ${MEDIA_REFRESH}" \
+    && uv pip install --system --upgrade --pre 'yt-dlp[default]' bgutil-ytdlp-pot-provider
+
 ENTRYPOINT ["python", "-m", "ttsbot.bot"]
