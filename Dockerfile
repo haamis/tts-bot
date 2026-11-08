@@ -29,12 +29,19 @@ WORKDIR /app
 
 COPY requirements.txt requirements-rvc.txt ./
 
-RUN uv pip install --index-strategy unsafe-best-match \
+RUN --mount=type=cache,target=/root/.cache/uv uv pip install --index-strategy unsafe-best-match \
     --extra-index-url https://download.pytorch.org/whl/cpu \
     torch==2.4.1+cpu torchaudio==2.4.1+cpu
 
-RUN uv pip install -r requirements.txt \
+RUN --mount=type=cache,target=/root/.cache/uv uv pip install -r requirements.txt \
     && uv pip install -r requirements-rvc.txt
+
+# Keep media refreshes independent of application-only changes.
+ARG MEDIA_REFRESH=manual
+LABEL homelab.media-refresh=true
+RUN --mount=type=cache,target=/root/.cache/uv \
+    echo "Media dependency refresh: ${MEDIA_REFRESH}" \
+    && uv pip install --system --upgrade --pre 'yt-dlp[default]' bgutil-ytdlp-pot-provider
 
 COPY rvc_infer/ ./rvc_infer/
 COPY ttsbot/ ./ttsbot/
@@ -44,19 +51,12 @@ COPY ttsbot-diarize/ ./ttsbot-diarize/
 COPY pyproject.toml ./
 COPY .env.example ./
 
-RUN uv pip install --no-deps -e . \
+RUN --mount=type=cache,target=/root/.cache/uv uv pip install --no-deps -e . \
     && uv pip install --no-deps -e ./ttsbot-diarize
 
 RUN mkdir -p /app/rvc_models /app/temp
 
 ENV RVC_MODELS_DIR=/app/rvc_models \
     TEMP_DIR=/app/temp
-
-# Bust only the media dependency layer during scheduled maintenance. Rebuilding
-# unchanged requirements alone would otherwise reuse stale yt-dlp/plugin wheels.
-ARG MEDIA_REFRESH=manual
-LABEL homelab.media-refresh=true
-RUN echo "Media dependency refresh: ${MEDIA_REFRESH}" \
-    && uv pip install --system --upgrade --pre 'yt-dlp[default]' bgutil-ytdlp-pot-provider
 
 ENTRYPOINT ["python", "-m", "ttsbot.bot"]
