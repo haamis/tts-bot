@@ -8,6 +8,7 @@ import ttsbot.network as net
 @pytest.fixture(autouse=True)
 def _reset_wake_cooldown(monkeypatch):
     monkeypatch.setattr(net, "_wake_failed_until", 0.0)
+    monkeypatch.setattr(net, "_preferred_failed_until", {})
 
 
 async def test_ensure_awake_noop_without_mac(monkeypatch):
@@ -82,3 +83,32 @@ async def test_ensure_awake_skips_wol_after_a_failed_wake(monkeypatch):
     assert await net.ensure_awake("http://gpu", "aa:bb:cc:dd:ee:ff", timeout=10) is False
     assert sends == ["aa:bb:cc:dd:ee:ff"]
     assert sleeps == []
+
+
+def test_preferred_connection_cooldown_expires(monkeypatch):
+    import aiohttp
+
+    clock = [100.0]
+    monkeypatch.setattr(net.time, "monotonic", lambda: clock[0])
+    with pytest.raises(RuntimeError, match="wrapped"):
+        with net.preferred_gpu_attempt("http://4080"):
+            raise RuntimeError("wrapped") from aiohttp.ClientConnectionError("offline")
+    with pytest.raises(net.PreferredGpuUnavailable):
+        with net.preferred_gpu_attempt("http://4080"):
+            pytest.fail("must skip a disconnected desktop")
+    # A failure on the desktop must not prevent contacting ifrit.
+    with net.preferred_gpu_attempt("http://ifrit"):
+        pass
+    clock[0] += 61
+    with net.preferred_gpu_attempt("http://4080"):
+        pass
+    assert "http://4080" not in net._preferred_failed_until
+
+
+def test_preferred_inference_errors_do_not_disable_other_endpoints():
+    with pytest.raises(RuntimeError, match="missing checkpoint"):
+        with net.preferred_gpu_attempt("http://4080"):
+            raise RuntimeError("HTTP 503: missing checkpoint")
+    with net.preferred_gpu_attempt("http://4080"):
+        pass
+    assert not net._preferred_failed_until

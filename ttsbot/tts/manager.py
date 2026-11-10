@@ -183,11 +183,13 @@ def build_tts_manager(env: dict, ffmpeg_path: str = "ffmpeg") -> TTSManager:
 
     kokoro_remote = None
     server_url = env.get("RVC_GPU_SERVER_URL", "")
-    if server_url and provider in ("auto", "openrouter"):
+    if (server_url or env.get("RVC_GPU_PREFERRED_URL")) and provider in ("auto", "openrouter"):
         # ifrit takes the Kokoro tier on GPU (all commands, auto mode);
         # "local" stays fully on-box.
         kokoro_remote = KokoroRemoteRunner(
             server_url=server_url,
+            preferred_server_url=env.get("RVC_GPU_PREFERRED_URL", ""),
+            preferred_server_token=env.get("RVC_GPU_PREFERRED_TOKEN", ""),
             server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
             server_timeout=float(env.get("RVC_GPU_SERVER_TIMEOUT", 900)),
             wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),

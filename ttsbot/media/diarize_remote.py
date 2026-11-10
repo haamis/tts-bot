@@ -15,7 +15,7 @@ from pathlib import Path
 import aiohttp
 
 from ttsbot.media.diarize import DiarizationAnalysis, Segment
-from ttsbot.network import ensure_awake
+from ttsbot.network import ensure_awake, preferred_gpu_attempt, PreferredGpuUnavailable
 from ttsbot.rvc.runner import PROTOCOL_HEADER, PROTOCOL_VERSION
 
 log = logging.getLogger("ttsbot.media.diarize_remote")
@@ -39,7 +39,20 @@ async def diarize_remote(
     threshold: float,
     wol_mac: str = "",
     wol_broadcast: str = "255.255.255.255",
+    preferred_server_url: str = "",
+    preferred_server_token: str = "",
 ) -> DiarizationAnalysis:
+    if preferred_server_url:
+        try:
+            with preferred_gpu_attempt(preferred_server_url):
+                return await diarize_remote(
+                    preferred_server_url, preferred_server_token, server_timeout,
+                    source_path, engine, num_voices, threshold,
+                )
+        except (DiarizeTransientError, PreferredGpuUnavailable) as e:
+            log.warning("Preferred GPU diarization failed (%s); trying next server", e)
+    if not server_url:
+        raise DiarizeTransientError("No remaining GPU diarization server")
     await ensure_awake(server_url, wol_mac, wol_broadcast)
     headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
     if server_token:
@@ -56,7 +69,7 @@ async def diarize_remote(
     form.add_field("threshold", str(float(threshold)))
 
     try:
-        timeout = aiohttp.ClientTimeout(total=server_timeout)
+        timeout = aiohttp.ClientTimeout(total=server_timeout, connect=5, sock_connect=5)
         async with aiohttp.ClientSession(timeout=timeout) as sess:
             async with sess.post(
                 server_url.rstrip("/") + "/diarize", data=form, headers=headers

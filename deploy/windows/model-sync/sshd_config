@@ -1,0 +1,10 @@
+Port 22
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+AllowUsers haama
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+DisableForwarding yes
+Subsystem sftp internal-sftp

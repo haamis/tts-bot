@@ -3,10 +3,37 @@
 import asyncio
 import logging
 import socket
+import time
+from contextlib import contextmanager
 
 import aiohttp
 
 log = logging.getLogger("ttsbot.network")
+
+_preferred_failed_until: dict[str, float] = {}
+
+
+class PreferredGpuUnavailable(RuntimeError):
+    """The always-on desktop recently failed to connect; try ifrit instead."""
+
+
+@contextmanager
+def preferred_gpu_attempt(url: str):
+    """Share a short connection-failure cooldown across GPU operations."""
+    if time.monotonic() < _preferred_failed_until.get(url, 0):
+        raise PreferredGpuUnavailable(f"GPU server {url} is in connection cooldown")
+    try:
+        yield
+    except Exception as error:
+        cause = error
+        while cause is not None:
+            if isinstance(cause, (aiohttp.ClientConnectionError, asyncio.TimeoutError)):
+                _preferred_failed_until[url] = time.monotonic() + 60
+                break
+            cause = cause.__cause__
+        raise
+    else:
+        _preferred_failed_until.pop(url, None)
 
 
 def send_wol(mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> bool:

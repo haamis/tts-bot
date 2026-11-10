@@ -310,6 +310,16 @@ With a GPU desktop on the LAN, RVC conversion moves off the thin client:
 - **Thin client**: set `RVC_GPU_SERVER_URL=http://<desktop>:8001`
   (+ optional `RVC_GPU_SERVER_TOKEN`). The bot uploads each turn/segment
   and plays back the returned wav.
+- **Second desktop (Windows / RTX 4080)**: see
+  [deploy/windows/README.md](deploy/windows/README.md). Set
+  `RVC_GPU_PREFERRED_URL` and `RVC_GPU_PREFERRED_TOKEN` to try that always-on
+  desktop before the existing WoL-capable server, then local CPU. This order
+  covers RVC, separation, Chatterbox-VC, Kokoro and diarization. Chatterbox-VC
+  has no CPU implementation. Set `RVC_GPU_PREFERRED_SYNC_DEST` to mirror voice
+  models to both desktops; the preferred desktop never receives WoL.
+  Connection failures skip the preferred desktop for 60 seconds across GPU
+  operations, avoiding another connection timeout for every turn. HTTP/data
+  errors do not disable other endpoints on that desktop.
 - **Wake-on-LAN**: with `RVC_GPU_SERVER_WOL_MAC` set, the clients probe
   `/health`, send a magic packet when the desktop is down, and wait up to
   60s for it before the request — so the command that wakes it still runs on

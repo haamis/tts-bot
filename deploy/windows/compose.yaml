@@ -1,0 +1,31 @@
+# Run from WSL: docker compose -f deploy/windows/compose.yaml up -d --build
+services:
+  rvc-server:
+    extends:
+      file: ../../rvc-gpu-server/compose.yaml
+      service: rvc-server
+    gpus: all
+    environment:
+      ONNX_PROVIDER: CUDAExecutionProvider
+    volumes:
+      # Reuse ifrit's dependency image, but run this checkout's server code.
+      - ${HOME}/TTS-bot/rvc-gpu-server:/app:ro
+
+  model-sync:
+    build: ./model-sync
+    restart: unless-stopped
+    # 2223 avoids colliding with the temporary WSL SSH bootstrap on 2222.
+    ports:
+      - "2223:22"
+    volumes:
+      - ${HOME}/TTS-bot/rvc_models:/home/haama/TTS-bot/rvc_models
+      - ${HOME}/.config/rvc-server/authorized_keys:/etc/ssh/authorized_keys/haama:ro
+      - ssh-host-keys:/etc/ssh/keys
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ssh-host-keys:

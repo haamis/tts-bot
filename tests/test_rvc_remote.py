@@ -125,6 +125,30 @@ async def test_separation_fallback_runs_pymss_worker(tmp_path, fake_http, status
     assert runner.last_via == "subprocess"
 
 
+@pytest.mark.parametrize(
+    "event,code",
+    [("fatal", 1), ("file", 0), ("retry_fp32", 75)],
+)
+async def test_separation_worker_errors_on_stdout(tmp_path, event, code, caplog):
+    import json
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    detail = "Traceback from worker\nFileNotFoundError: missing separation weights"
+    payload = json.dumps({"event": event, "ok": False, "message": detail})
+    (tools / "pymss_webui.py").write_text(
+        "def _pymss_worker_main(request_path):\n"
+        f"    print({payload!r})\n"
+        f"    return {code}\n"
+    )
+    runner = _runner(tmp_path)
+    with pytest.raises(RuntimeError, match="FileNotFoundError: missing separation weights"):
+        await runner.separate_vocals(
+            tmp_path / "in.wav", tmp_path / "vocals.wav", tmp_path / "instrumental.wav"
+        )
+    assert detail in caplog.text
+
+
 async def test_separation_auth_failure_does_not_fall_back(tmp_path, fake_http, monkeypatch):
     fake_http.status = 401
     fake_http.body = b"unauthorized"

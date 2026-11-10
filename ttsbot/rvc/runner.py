@@ -6,10 +6,11 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from contextlib import nullcontext
 
 import aiohttp
 
-from ttsbot.network import ensure_awake
+from ttsbot.network import ensure_awake, preferred_gpu_attempt
 
 log = logging.getLogger("ttsbot.rvc")
 
@@ -40,6 +41,8 @@ class RvcRunner:
         server_timeout: float = 900,
         wol_mac: str = "",
         wol_broadcast: str = "255.255.255.255",
+        preferred_server_url: str = "",
+        preferred_server_token: str = "",
     ):
         self.infer_script = Path(infer_script)
         self.rvc_root = Path(rvc_root).resolve()
@@ -52,6 +55,12 @@ class RvcRunner:
         self.server_timeout = server_timeout
         self.wol_mac = (wol_mac or "").replace("-", ":").lower()
         self.wol_broadcast = wol_broadcast
+        # The preferred desktop is never woken; the existing server keeps WoL.
+        self.preferred = RvcRunner(
+            infer_script, rvc_root, use_worker=False,
+            server_url=preferred_server_url, server_token=preferred_server_token,
+            server_timeout=server_timeout,
+        ) if preferred_server_url else None
         self._worker: asyncio.subprocess.Process | None = None
         self._worker_lock = asyncio.Lock()
         self._worker_disabled = False
@@ -82,13 +91,14 @@ class RvcRunner:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.server_url:
+        if self.preferred or self.server_url:
             # Remote first. Deterministic rejections (4xx) fail fast with no
             # local retry; transport/5xx errors degrade to the local worker
             # below. Model paths are NOT checked locally here — they live on
             # the server, which validates them (400 on missing).
             try:
-                return await self._convert_remote(
+                return await self._call_remote(
+                    "_convert_remote",
                     input_path, output_path, model_path, index_path,
                     pitch, index_rate, f0_method, resample_sr,
                     rms_mix_rate, protect, speaker_id,
@@ -139,12 +149,36 @@ class RvcRunner:
         target_voice_path = Path(target_voice_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not self.server_url:
+        if not self.preferred and not self.server_url:
             raise RuntimeError("Chatterbox-VC requires RVC_GPU_SERVER_URL (GPU server)")
 
         if not target_voice_path.exists():
             raise RuntimeError(f"Target voice reference not found: {target_voice_path}")
 
+        return await self._call_remote(
+            "_convert_vc_remote", input_path, output_path, target_voice_path,
+        )
+
+    async def _call_remote(self, method: str, *args):
+        """Try the always-on desktop, then the WoL-capable server."""
+        last_error = None
+        for runner in (self.preferred, self):
+            if runner is None or not runner.server_url:
+                continue
+            try:
+                attempt = preferred_gpu_attempt(runner.server_url) if runner is self.preferred else nullcontext()
+                with attempt:
+                    result = await getattr(runner, method)(*args)
+                self.last_via = "remote"
+                return result
+            except RVCRequestError:
+                raise
+            except Exception as e:
+                log.warning("GPU server %s failed: %s", runner.server_url, e)
+                last_error = e
+        raise WorkerCrashed(f"All GPU servers failed: {last_error}") from last_error
+
+    async def _convert_vc_remote(self, input_path, output_path, target_voice_path) -> str:
         await ensure_awake(self.server_url, self.wol_mac, self.wol_broadcast)
         headers = {PROTOCOL_HEADER: PROTOCOL_VERSION}
         if self.server_token:
@@ -164,7 +198,7 @@ class RvcRunner:
         )
 
         try:
-            timeout = aiohttp.ClientTimeout(total=self.server_timeout)
+            timeout = aiohttp.ClientTimeout(total=self.server_timeout, connect=5, sock_connect=5)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.post(
                     self.server_url + "/vc", data=form, headers=headers
@@ -212,9 +246,11 @@ class RvcRunner:
         vocals_path.parent.mkdir(parents=True, exist_ok=True)
         instrumental_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if self.server_url:
+        if self.preferred or self.server_url:
             try:
-                return await self._separate_remote(input_path, vocals_path, instrumental_path, model)
+                return await self._call_remote(
+                    "_separate_remote", input_path, vocals_path, instrumental_path, model,
+                )
             except RVCRequestError:
                 raise
             except Exception as e:
@@ -242,7 +278,7 @@ class RvcRunner:
         form.add_field("model", model)
 
         try:
-            timeout = aiohttp.ClientTimeout(total=self.server_timeout)
+            timeout = aiohttp.ClientTimeout(total=self.server_timeout, connect=5, sock_connect=5)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.post(
                     self.server_url + "/separate", data=form, headers=headers
@@ -331,8 +367,23 @@ class RvcRunner:
 
             stdout, stderr = await proc.communicate()
 
-            if proc.returncode not in (0, 75):  # 75 = FP32 retry exit code
-                err = stderr.decode().strip()
+            # PyMSS reports failures as JSON events on stdout, even with exit 0.
+            errors = []
+            for line in stdout.decode(errors="replace").splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and (
+                    event.get("event") in ("fatal", "retry_fp32")
+                    or (event.get("event") == "file" and event.get("ok") is False)
+                ):
+                    errors.append(str(event.get("message") or event["event"]))
+
+            if proc.returncode != 0 or errors:
+                detail = "\n".join(errors) or stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip()
+                log.error("PyMSS separation failed (exit %s): %s", proc.returncode, detail)
+                err = detail.splitlines()[-1] if detail else "worker returned no diagnostics"
                 raise RuntimeError(f"PyMSS separation failed (exit {proc.returncode}): {err}")
 
             # Find output files
@@ -404,7 +455,7 @@ class RvcRunner:
             form.add_field(key, value)
 
         try:
-            timeout = aiohttp.ClientTimeout(total=self.server_timeout)
+            timeout = aiohttp.ClientTimeout(total=self.server_timeout, connect=5, sock_connect=5)
             async with aiohttp.ClientSession(timeout=timeout) as sess:
                 async with sess.post(
                     self.server_url + "/convert", data=form, headers=headers

@@ -9,6 +9,20 @@ Discord bot: multi-turn dialogue TTS with RVC voice conversion. `!speak %voice t
 Python 3.12, CPU-only bot host (4C/8T, 16GB RAM, AMD 2400GE thin client).
 GPU inference runs on ifrit (RTX 2060, 6GB) via the Dockerized server.
 
+Optional preferred worker: Windows desktop `192.168.1.161` (RTX 4080), Docker
+Desktop / WSL2, `deploy/windows/compose.yaml`. `RVC_GPU_PREFERRED_URL/TOKEN`
+adds it before the existing ifrit target, without WoL; transient failures try
+ifrit and then local CPU. Its Docker-managed model-sync SSH is port 2223
+(`tts-4080` SSH alias on boksi); `RVC_GPU_PREFERRED_SYNC_DEST` adds it to model
+sync without replacing ifrit. No WSL portproxy or scheduled task is required.
+Connection failures skip the preferred desktop for 60s across GPU clients;
+HTTP/data errors do not trigger that cooldown. Connection setup includes a
+5s DNS/connect budget; inference keeps its separate generous request timeout.
+Provision inference assets from ifrit's `~/rvc-gpu-server/rvc_infer/assets/`,
+not just boksi's copy: the 610 MiB PyMSS BS-Roformer checkpoint can exist only
+on ifrit. `/health` and TTS/RVC smoke tests do not verify `/separate`; a missing
+checkpoint silently sends separation to ifrit via the normal 503 fallback.
+
 **Deployment boundary:** this host is **boksi**, the CPU-only bot host. The live
 bot is Docker container `tts-bot` (`docker-compose.yml`), NOT a host venv process.
 GPU server `rvc-server` runs on **ifrit**, `192.168.1.162`, from

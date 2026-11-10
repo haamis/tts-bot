@@ -205,6 +205,9 @@ def load_env() -> dict:
         # the DESKTOP; RVC_WORKER/RVC_WORKER_MAX_RSS_MB/RVC_DEVICE are then
         # evaluated server-side, not here.
         "RVC_GPU_SERVER_URL": os.getenv("RVC_GPU_SERVER_URL", "").rstrip("/"),
+        # Optional always-on desktop, tried before the WoL-capable server.
+        "RVC_GPU_PREFERRED_URL": os.getenv("RVC_GPU_PREFERRED_URL", "").rstrip("/"),
+        "RVC_GPU_PREFERRED_TOKEN": os.getenv("RVC_GPU_PREFERRED_TOKEN", ""),
         "RVC_GPU_SERVER_TOKEN": os.getenv("RVC_GPU_SERVER_TOKEN", ""),
         "RVC_GPU_SERVER_TIMEOUT": float(os.getenv("RVC_GPU_SERVER_TIMEOUT", "900")),
         # Wake-on-LAN for the GPU server. Set MAC to wake the desktop before

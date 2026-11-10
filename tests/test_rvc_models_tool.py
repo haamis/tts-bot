@@ -278,8 +278,8 @@ def test_sync_models_syncs_existing_and_skips_rest(monkeypatch, tmp_path):
     monkeypatch.setattr(rvc_models, "Config", SimpleNamespace(load=lambda path: FakeConfig))
     monkeypatch.setattr(rvc_models, "DEFAULT_MODEL_DIR", root)
     monkeypatch.setattr(
-        rvc_models, "sync_settings",
-        lambda: ("http://ifrit", "ifrit.local:/mirror", 1, "", ""),
+        rvc_models, "sync_targets",
+        lambda: [("http://ifrit", "ifrit.local:/mirror", 1, "", "")],
     )
     monkeypatch.setattr(rvc_models, "ensure_awake", lambda *a: True)
     synced = []

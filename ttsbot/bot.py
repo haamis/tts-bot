@@ -69,6 +69,8 @@ class TTSBot(commands.Bot):
                 rvc_root=str(rvc_root),
                 use_worker=env["RVC_WORKER"],
                 server_url=env["RVC_GPU_SERVER_URL"],
+                preferred_server_url=env.get("RVC_GPU_PREFERRED_URL", ""),
+                preferred_server_token=env.get("RVC_GPU_PREFERRED_TOKEN", ""),
                 server_token=env["RVC_GPU_SERVER_TOKEN"],
                 server_timeout=env["RVC_GPU_SERVER_TIMEOUT"],
                 wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
@@ -1001,7 +1003,7 @@ class TTSBot(commands.Bot):
             if (engine == "pyannote" or (engine == "auto" and self.env["HF_TOKEN"]))
             else "local"
         )
-        if self.env.get("RVC_GPU_SERVER_URL", ""):
+        if self.env.get("RVC_GPU_PREFERRED_URL") or self.env.get("RVC_GPU_SERVER_URL"):
             try:
                 analysis = await diarize_remote(
                     self.env["RVC_GPU_SERVER_URL"],
@@ -1013,6 +1015,8 @@ class TTSBot(commands.Bot):
                     threshold,
                     self.env.get("RVC_GPU_SERVER_WOL_MAC", ""),
                     self.env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
+                    preferred_server_url=self.env.get("RVC_GPU_PREFERRED_URL", ""),
+                    preferred_server_token=self.env.get("RVC_GPU_PREFERRED_TOKEN", ""),
                 )
                 return diarize.finalize_result(
                     analysis, source_path, voice_names, voice_f0
@@ -1261,10 +1265,8 @@ class TTSBot(commands.Bot):
         "subprocess" then means the remote convert failed and we degraded.
         Without a server URL those are the normal transports (no note).
         """
-        if self.env["RVC_GPU_SERVER_URL"] and self.pipeline.rvc.last_via in (
-            "worker",
-            "subprocess",
-        ):
+        remote_configured = self.env.get("RVC_GPU_PREFERRED_URL") or self.env["RVC_GPU_SERVER_URL"]
+        if remote_configured and self.pipeline.rvc.last_via in ("worker", "subprocess"):
             return " ⚠️ GPU server unreachable — used local slow path"
         return ""
 
@@ -1351,6 +1353,8 @@ async def main():
                 rvc_root=str(PROJECT_ROOT / config.rvc_root),
                 use_worker=env["RVC_WORKER"],
                 server_url=env.get("RVC_GPU_SERVER_URL", ""),
+                preferred_server_url=env.get("RVC_GPU_PREFERRED_URL", ""),
+                preferred_server_token=env.get("RVC_GPU_PREFERRED_TOKEN", ""),
                 server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
                 server_timeout=env.get("RVC_GPU_SERVER_TIMEOUT", 900),
                 wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),

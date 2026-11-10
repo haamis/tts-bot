@@ -353,6 +353,21 @@ def sync_settings() -> tuple[str, str, float, str, str]:
     )
 
 
+def sync_targets():
+    """Mirror to both desktops; the preferred desktop never gets WoL."""
+    fallback = sync_settings()  # Also loads .env.
+    url = os.getenv("RVC_GPU_PREFERRED_URL", "").rstrip("/")
+    dest = os.getenv("RVC_GPU_PREFERRED_SYNC_DEST", "").strip().rstrip("/")
+    if url or dest:
+        if not dest:
+            host = urlparse(url).hostname
+            if not host:
+                raise ValueError("RVC_GPU_PREFERRED_URL must include a hostname")
+            dest = f"{host}:{DEFAULT_MODEL_DIR}"
+        yield url, dest, 0, "", ""
+    yield fallback
+
+
 def _health_ok(url: str) -> bool:
     try:
         requests.get(f"{url}/health", timeout=2)
@@ -414,7 +429,12 @@ def _report_sync_error(e: Exception) -> None:
 
 def sync_voice_to_gpu(name: str, src_dir: Path) -> bool:
     """Wake if needed and rsync one voice dir. False on any failure."""
-    url, dest, timeout, mac, broadcast = sync_settings()
+    results = [_sync_voice_to_gpu(name, src_dir, target) for target in sync_targets()]
+    return all(results)
+
+
+def _sync_voice_to_gpu(name, src_dir, settings) -> bool:
+    url, dest, timeout, mac, broadcast = settings
     if not dest:
         print("Model sync skipped (RVC_GPU_SERVER_URL / RVC_GPU_MODEL_SYNC_DEST unset).")
         return True
@@ -423,7 +443,7 @@ def sync_voice_to_gpu(name: str, src_dir: Path) -> bool:
         print(f"Model sync skipped: {src_dir} is outside {DEFAULT_MODEL_DIR}.")
         return False
     if not ensure_awake(url, mac, broadcast, timeout):
-        print(f"GPU server did not wake within {timeout:.0f}s.")
+        print(f"GPU server unavailable: {url} (wake budget {timeout:.0f}s).")
         return False
     print(f"Syncing {name} -> {dest}/{rel}/")
     try:
@@ -435,8 +455,13 @@ def sync_voice_to_gpu(name: str, src_dir: Path) -> bool:
 
 
 def sync_models(names: list[str]) -> int:
-    """Sync named voices (default: all configured) to the GPU box. 0 = ok."""
-    url, dest, timeout, mac, broadcast = sync_settings()
+    """Sync named voices (default: all configured) to both GPU boxes. 0 = ok."""
+    results = [_sync_models(names, target) for target in sync_targets()]
+    return 1 if any(results) else 0
+
+
+def _sync_models(names, settings) -> int:
+    url, dest, timeout, mac, broadcast = settings
     if not dest:
         print("Model sync skipped (RVC_GPU_SERVER_URL / RVC_GPU_MODEL_SYNC_DEST unset).")
         return 0
@@ -465,7 +490,7 @@ def sync_models(names: list[str]) -> int:
             continue
         if not awake:
             if not ensure_awake(url, mac, broadcast, timeout):
-                print(f"GPU server did not wake within {timeout:.0f}s.")
+                print(f"GPU server unavailable: {url} (wake budget {timeout:.0f}s).")
                 return 1
             awake = True
         print(f"Syncing {name} -> {dest}/{rel}/")
@@ -546,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Model sync skipped (--no-sync).")
         return 0
     if not sync_voice_to_gpu(name, Path(pth).parent):
-        print(f"Voice '{name}' is local-only; remote RVC rejects it until synced.")
+        print(f"Voice '{name}' is installed locally but not synced to every GPU server.")
         print(f"Retry: python tools/rvc_models.py sync {name}")
         return 1
     return 0
