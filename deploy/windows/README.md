@@ -8,14 +8,32 @@ Docker Desktop must be running (enable its start-at-login setting).
 
 Keep runtime files in WSL's Linux filesystem, not `/mnt/c`:
 
-- `~/TTS-bot/`: this checkout, including `rvc-gpu-server`, `rvc_infer`,
-  `ttsbot-diarize`, and the canonical voice models copied from boksi.
+- `~/TTS-bot/`: this checkout, including `rvc-gpu-server`, `rvc_infer`, and
+  `ttsbot-diarize`.
 - `~/rvc-gpu-server/models`: Kokoro's ONNX model and voice bank.
 - `~/.cache/huggingface` and `~/.cache/torch`: writable model caches.
 - `~/.config/rvc-server/env`: mode 600; `RVC_GPU_SERVER_TOKEN` and optional
   `HF_TOKEN` / `PYANNOTE_MODEL_ID`. Never put this file in git.
-- `~/.config/rvc-server/authorized_keys`: mode 600; boksi's dedicated public
+- `~/.config/rvc-server/model-sync-keys/haama`: mode 600; authorized public
   SSH key. Group-writable key files are rejected by sshd.
+
+Voice models live in the Docker-managed `ttsbot-rvc-voice-models` volume,
+mounted read-only in the GPU worker and read-write in model-sync. WSL bind
+mounts of the model directory came back empty after a reboot; a volume keeps
+the data across Docker Desktop restarts and lets both containers share one
+copy. Boksi stays canonical: `tools/rvc_models.py sync` still rsyncs to
+`tts-4080:/home/haama/TTS-bot/rvc_models`, which now resolves inside the
+model-sync container. Delete any WSL copy at that path; it is not used.
+
+Public keys are copied to the Docker-managed `ttsbot-model-sync-authorized-keys`
+volume, mounted read-only by SSH. Do not bind-mount keys from WSL: Docker
+Desktop restored a file mount as a directory (exit 127); a remote restart in
+Windows session 0 also left a directory mount empty. Never mount
+the parent `~/.config/rvc-server` directory, which contains real tokens.
+The canonical source is `~/.config/rvc-server/model-sync-keys/haama` (mode
+600; one full public-key line per authorized key). After adding or revoking
+keys, rerun `sh deploy/windows/init-model-sync.sh`; SSH sees the update
+without a restart.
 
 Copy **all runtime assets from ifrit**, not just the bot host's inference
 assets: ifrit's source is `~/rvc-gpu-server/rvc_infer/assets/`. In particular,
@@ -46,6 +64,7 @@ From `~/TTS-bot` in WSL, build the small SSH image and start both services:
 
 ```bash
 docker compose -f deploy/windows/compose.yaml build model-sync
+sh deploy/windows/init-model-sync.sh
 docker compose -f deploy/windows/compose.yaml up -d --no-build
 ```
 
@@ -96,6 +115,17 @@ Host tts-4080-admin
 ```
 
 Verify the Windows host-key fingerprint before trusting this connection.
+Docker Desktop must run in the logged-in interactive session, not Windows
+SSH's session 0. Do not start it directly through SSH or `Win32_Process.Create`:
+WSL bind projections can be empty in that context. A temporary Interactive
+one-shot launch task, removed afterward, can recover it remotely; normal
+startup still uses Docker Desktop's start-at-login setting, not a recurring
+task. Verify its SessionId matches explorer and check container health rather
+than treating the CLI's "Starting Docker Desktop" message as readiness.
+Run Compose create/recreate operations with WSL bind mounts in that interactive
+context too. A model-sync recreation through SSH session 0 produced an empty
+model-directory projection; recreating it interactively restored the actual
+models and permissions without changing the host data.
 
 Keep the model-sync container separate: it still has no Docker socket or
 access to Windows administration. Do not expose either SSH port to the internet.

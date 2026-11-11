@@ -5,4 +5,5 @@ RUN apk add --no-cache openssh rsync \
     && mkdir -p /etc/ssh/authorized_keys /etc/ssh/keys /home/haama/TTS-bot/rvc_models \
     && chown -R haama:haama /home/haama
 COPY sshd_config /etc/ssh/sshd_config
-CMD ["sh", "-c", "test -f /etc/ssh/keys/ssh_host_ed25519_key || ssh-keygen -t ed25519 -N '' -f /etc/ssh/keys/ssh_host_ed25519_key; exec /usr/sbin/sshd -D -e"]
+COPY start.sh /usr/local/bin/start-model-sync
+CMD ["sh", "/usr/local/bin/start-model-sync"]

@@ -26,6 +26,18 @@ on 2223 remains restricted and has no Docker socket. Native SSH host private
 keys must be owned by SYSTEM/Administrators with access restricted to those
 identities: installer-user-owned keys caused service exit 1067 while the
 same sshd binary worked interactively. Preserve host keys; fix ACLs instead.
+Windows SSH runs in session 0; Docker Desktop must run in the logged-in
+interactive session (same SessionId as explorer). Direct SSH/WMI launches
+can leave WSL bind projections empty. For remote recovery, launch in the
+interactive user's context (a temporary Interactive one-shot task can do this;
+remove it afterward), not `Win32_Process.Create`. Normal startup stays Docker
+Desktop's start-at-login setting. CLI "Starting" is not container readiness.
+Create/recreate WSL bind-mounted containers from that interactive context too:
+recreating model-sync through SSH session 0 left its model directory empty;
+an Interactive-context recreate restored the real, writable models immediately.
+Docker registry credential helpers can fail from Windows SSH with "logon
+session does not exist". Transfer a tested image with save/load rather than
+changing the user's global Docker credential store.
 Connection failures skip the preferred desktop for 60s across GPU clients;
 HTTP/data errors do not trigger that cooldown. Connection setup includes a
 5s DNS/connect budget; inference keeps its separate generous request timeout.
@@ -139,7 +151,7 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
   config and verified known_hosts belong there. Template:
   `deploy/bot/model-sync-ssh.conf`. Dedicated bot Ed25519 keys are authorized
   with `restrict` on ifrit (`~/.ssh/authorized_keys`) and the 4080 model-sync
-  service (WSL `~/.config/rvc-server/authorized_keys`); do not copy GitHub or
+  service (WSL `~/.config/rvc-server/model-sync-keys/haama`); do not copy GitHub or
   Windows administrator keys into the bot. ifrit needs an explicit identity
   and HostKeyAlias for its trusted IP; the host CLI's key is `id_local`, not
   a default SSH filename. The bot does not inherit the host's SSH agent. Use
@@ -147,6 +159,22 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
   rejecting a host-user-owned SSH config. Model downloads/extraction cap at
   2 GiB. Config mutations use a stable flock file and atomic replacement,
   preserving ownership so host-side CLI edits still work after Docker writes.
+- Windows voice models and authorized keys live in Docker-managed volumes,
+  not WSL binds: after a Docker Desktop restart the model directory bind was
+  empty (model sync and RVC saw no voices). `ttsbot-rvc-voice-models` is
+  mounted read-only into the GPU worker and read-write into model-sync, so
+  the existing `RVC_GPU_PREFERRED_SYNC_DEST=tts-4080:/home/haama/TTS-bot/rvc_models`
+  still works. Any WSL host directory at that path is unused and should be
+  deleted.
+- The Windows model-sync service uses the Docker-managed
+  `ttsbot-model-sync-authorized-keys` volume read-only. WSL key binds are
+  unreliable during startup: the file bind returned as a directory (exit 127),
+  and a directory bind was empty under a session-0 Docker launch. The canonical
+  key file is WSL `~/.config/rvc-server/model-sync-keys/haama`; after editing
+  it, run `sh deploy/windows/init-model-sync.sh` to refresh the volume and
+  create any missing volumes. Never mount the parent rvc-server config
+  directory into SSH: its env file contains real tokens. Startup fails clearly
+  if keys are missing.
 - The ifrit server runs from `rvc-gpu-server/compose.yaml` (Docker,
   `restart: unless-stopped`); the old `rvc-server` systemd user unit is
   disabled. Rebuild with
