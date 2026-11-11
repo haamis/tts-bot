@@ -98,8 +98,10 @@ Windows native OpenSSH provides management access independently of Docker and
 WSL. On boksi, `ssh tts-4080-admin` connects to Windows port 22 as `haama`;
 use `wsl.exe -e ...` to manage Docker and the Linux deployment files. The
 Windows `sshd` service starts automatically as LocalSystem. Access uses a
-dedicated public key, password authentication is disabled for this account,
-and the SSH firewall rules allow only boksi (`192.168.1.90`) on Private networks.
+dedicated public key. Password authentication is disabled server-wide, except
+for `haama`, where it is enabled on the owner's request (the `Match User haama`
+block); the SSH firewall rules allow only boksi (`192.168.1.90`) on Private
+networks.
 This is Windows administrator access, not a restricted model-sync shell.
 
 The administrative entry in boksi's `~/.ssh/config` is:

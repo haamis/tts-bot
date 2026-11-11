@@ -26,6 +26,9 @@ on 2223 remains restricted and has no Docker socket. Native SSH host private
 keys must be owned by SYSTEM/Administrators with access restricted to those
 identities: installer-user-owned keys caused service exit 1067 while the
 same sshd binary worked interactively. Preserve host keys; fix ACLs instead.
+The admin `sshd_config` disables password auth globally; its `Match User haama`
+block re-enables it for that account on the owner's request. Keep other
+accounts on publickey only.
 Windows SSH runs in session 0; Docker Desktop must run in the logged-in
 interactive session (same SessionId as explorer). Direct SSH/WMI launches
 can leave WSL bind projections empty. For remote recovery, launch in the
