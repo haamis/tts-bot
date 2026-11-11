@@ -24,6 +24,7 @@ from ttsbot.llm.openrouter import (
     load_prompts,
 )
 from ttsbot.audio.player import AudioPlayer, ensure_voice_channel
+from ttsbot.voice_commands import handle_voice_command
 
 
 logging.basicConfig(level=logging.INFO)
@@ -59,6 +60,7 @@ class TTSBot(commands.Bot):
 
         self.config = config
         self.env = env
+        self.voice_model_lock = asyncio.Lock()
         rvc_root = Path(config.rvc_root)
         if not rvc_root.is_absolute():
             rvc_root = PROJECT_ROOT / rvc_root
@@ -178,6 +180,10 @@ class TTSBot(commands.Bot):
             return
 
         prefix = self.env["COMMAND_PREFIX"]
+        for command in ("addvoice", "removevoice"):
+            if message.content == f"{prefix}{command}" or message.content.startswith(f"{prefix}{command} "):
+                await handle_voice_command(self, message, command)
+                return
         if message.content == f"{prefix}speak" or message.content.startswith(f"{prefix}speak "):
             await self._handle_speak_prefix(message)
             return

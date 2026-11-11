@@ -17,7 +17,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     unzip \
+    openssh-client \
+    rsync \
     && rm -rf /var/lib/apt/lists/*
+
+# Explicit identities and pre-trusted host keys, without exposing every host SSH key.
+ENV RVC_SYNC_SSH_CONFIG=/run/rvc-model-sync/config
 
 # yt-dlp's YouTube extractor needs a JS runtime; deno is the default.
 # Pinned: the installer script tracks latest otherwise; `deno --version`

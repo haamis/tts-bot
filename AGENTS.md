@@ -76,6 +76,7 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 | `ttsbot/llm/openrouter.py` | OpenRouter chat for `!generate` (reasoning off via `effort:none`; retries: over-cap, 429, empty, reasoning-mandatory 400, upstream 404/5xx — upstream retries exclude the failed provider via `provider.ignore`, parsed from the error body's `provider_name`) |
 | `ttsbot/audio/player.py` | playback; `_extract_url` lives in `bot.py` |
 | `config/voices.yaml` | user-tuned live — never assume its values in tests |
+| `ttsbot/voice_commands.py` | Manage Server-only `!addvoice` search/select/install and confirmed `!removevoice`; reuses `tools/rvc_models.py`, reloads voices live |
 
 ## Hard-won gotchas — do not relearn these
 
@@ -132,6 +133,20 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
   `RVC_GPU_MODEL_SYNC_DEST`). `sync [name ...]` retries/reconciles. A sync
   failure leaves the voice local-only; remote RVC returns 400 for it until
   synced. Do not add models directly on ifrit.
+- Discord model management needs a writable model mount and SSH/rsync in the
+  bot image. Compose mounts `~/.config/ttsbot/model-sync-ssh` (override
+  `RVC_SYNC_SSH_DIR`) read-only at `/run/rvc-model-sync`; only sync identities,
+  config and verified known_hosts belong there. Template:
+  `deploy/bot/model-sync-ssh.conf`. Dedicated bot Ed25519 keys are authorized
+  with `restrict` on ifrit (`~/.ssh/authorized_keys`) and the 4080 model-sync
+  service (WSL `~/.config/rvc-server/authorized_keys`); do not copy GitHub or
+  Windows administrator keys into the bot. ifrit needs an explicit identity
+  and HostKeyAlias for its trusted IP; the host CLI's key is `id_local`, not
+  a default SSH filename. The bot does not inherit the host's SSH agent. Use
+  `RVC_SYNC_SSH_CONFIG` for the explicit config file; it also avoids root
+  rejecting a host-user-owned SSH config. Model downloads/extraction cap at
+  2 GiB. Config mutations use a stable flock file and atomic replacement,
+  preserving ownership so host-side CLI edits still work after Docker writes.
 - The ifrit server runs from `rvc-gpu-server/compose.yaml` (Docker,
   `restart: unless-stopped`); the old `rvc-server` systemd user unit is
   disabled. Rebuild with

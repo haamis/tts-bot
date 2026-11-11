@@ -21,6 +21,8 @@ mount. `sync` retries/reconciles; `--no-sync` installs locally only.
 Restart the bot afterwards to pick up the new voice.
 """
 import argparse
+import fcntl
+import json
 import os
 import re
 import shlex
@@ -45,9 +47,10 @@ from ttsbot.network import send_wol  # noqa: E402
 
 BASE_URL = "https://voice-models.com"
 UA = {"User-Agent": "Mozilla/5.0 (ttsbot-rvc-models)"}
-DEFAULT_MODEL_DIR = PROJECT_ROOT / "rvc_models"
+DEFAULT_MODEL_DIR = Path(os.getenv("RVC_MODELS_DIR", str(PROJECT_ROOT / "rvc_models")))
 DIRECT_HOSTS = (r"huggingface\.co", r"cdn\.discordapp\.com", r"www\.mediafire\.com")
 VOICE_KEY_RE = re.compile(r"[a-z][a-z0-9_-]*")
+MAX_MODEL_BYTES = 2 * 1024**3
 
 DEFAULT_ENTRY = {
     "pitch": 0,
@@ -162,10 +165,21 @@ def _stream_to_file(url: str, dest: Path, session: requests.Session | None = Non
         resp.raise_for_status()
         if "text/html" in resp.headers.get("content-type", ""):
             raise SystemExit(f"Got an HTML page instead of a zip from {url}")
-        with open(dest, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1 << 20):
-                f.write(chunk)
+        _save_download(resp, dest)
     return dest
+
+
+def _save_download(resp: requests.Response, dest: Path) -> None:
+    resp.raise_for_status()
+    if int(resp.headers.get("content-length", "0")) > MAX_MODEL_BYTES:
+        raise ValueError("Model download exceeds the 2 GiB limit.")
+    size = 0
+    with open(dest, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            size += len(chunk)
+            if size > MAX_MODEL_BYTES:
+                raise ValueError("Model download exceeds the 2 GiB limit.")
+            f.write(chunk)
 
 
 def _download_gdrive(file_id: str, dest: Path) -> Path:
@@ -173,17 +187,22 @@ def _download_gdrive(file_id: str, dest: Path) -> Path:
     session = requests.Session()
     url = f"https://drive.google.com/uc?export=download&id={file_id}"
     resp = session.get(url, headers=UA, stream=True, timeout=120)
+    resp.raise_for_status()
     if "text/html" in resp.headers.get("content-type", ""):
         form = re.search(r"<form[^>]+action=\"([^\"]+)\"", resp.text)
         if not form:
             raise SystemExit("Google Drive download page has no confirm form (file private?)")
         fields = dict(re.findall(r"name=\"([^\"]+)\" value=\"([^\"]*)\"", resp.text))
         url = form.group(1).replace("&amp;", "&")
+        resp.close()
         resp = session.get(url, params=fields, headers=UA, stream=True, timeout=300)
-    with open(dest, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=1 << 20):
-            f.write(chunk)
-    head = open(dest, "rb").read(4)
+    try:
+        _save_download(resp, dest)
+    finally:
+        resp.close()
+        session.close()
+    with open(dest, "rb") as f:
+        head = f.read(4)
     if head[:2] != b"PK":
         raise SystemExit("Google Drive did not yield a zip (file too large for the confirm flow, or private). Use add-zip.")
     return dest
@@ -221,6 +240,8 @@ def pick_model_files(zip_path: Path) -> tuple[zipfile.ZipInfo, zipfile.ZipInfo |
 def install_model(zip_path: Path, voice_dir: Path, force: bool) -> tuple[Path, Path | None]:
     """Extract the chosen .pth/.index into voice_dir (one dir per voice)."""
     pth, index = pick_model_files(zip_path)
+    if pth.file_size + (index.file_size if index else 0) > MAX_MODEL_BYTES:
+        raise ValueError("Extracted model files exceed the 2 GiB limit.")
     voice_dir.mkdir(parents=True, exist_ok=True)
     targets = []
     for info in (pth, index):
@@ -237,6 +258,33 @@ def install_model(zip_path: Path, voice_dir: Path, force: bool) -> tuple[Path, P
 
 
 # --- config update (comment-preserving) --------------------------------------
+
+
+def _write_config(config_path: Path, original: str, candidate: str) -> None:
+    """Keep the old config intact on write failure or a competing edit."""
+    with open(config_path.with_suffix(".yaml.lock"), "a") as lock:
+        stat = config_path.stat()
+        if os.geteuid() == 0:
+            os.fchown(lock.fileno(), stat.st_uid, stat.st_gid)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if config_path.read_text() != original:
+            raise ValueError("Voice config changed during the operation; retry the command.")
+        with tempfile.NamedTemporaryFile(mode="w", dir=config_path.parent, delete=False) as f:
+            temporary = Path(f.name)
+            try:
+                f.write(candidate)
+                f.flush()
+                os.fsync(f.fileno())
+                stat = config_path.stat()
+                os.chmod(temporary, stat.st_mode & 0o777)
+                if os.geteuid() == 0:
+                    os.chown(temporary, stat.st_uid, stat.st_gid)
+                shutil.copy2(config_path, config_path.with_suffix(".yaml.bak"))
+                if os.geteuid() == 0:
+                    os.chown(config_path.with_suffix(".yaml.bak"), stat.st_uid, stat.st_gid)
+                os.replace(temporary, config_path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
 
 def slugify(name: str) -> str:
@@ -256,9 +304,9 @@ def default_voice_name(title: str, zip_url: str) -> str:
 
 
 def format_voice_entry(name: str, pth: Path, index: Path | None, provenance: str) -> str:
-    rvc_lines = [f"    rvc: {{model: {pth},"]
+    rvc_lines = [f"    rvc: {{model: {json.dumps(str(pth))},"]
     if index is not None:
-        rvc_lines.append(f"          index: {index},")
+        rvc_lines.append(f"          index: {json.dumps(str(index))},")
     for key, value in DEFAULT_ENTRY.items():
         rvc_lines.append(f"          {key}: {value},")
     rvc_lines[-1] = rvc_lines[-1].rstrip(",") + "}"
@@ -270,7 +318,7 @@ def format_voice_entry(name: str, pth: Path, index: Path | None, provenance: str
         f"    piper: {{voice: en_US-lessac-medium, speed: 0.7}}",
         f"    cloud: {{speed: 1.0}}",
         *rvc_lines,
-        f"    # Added by tools/rvc_models.py — {provenance}",
+        f"    # Added by tools/rvc_models.py — {' '.join(provenance.splitlines())}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -283,6 +331,11 @@ def insert_voice_block(config_path: Path, name: str, block: str) -> None:
     with yaml.safe_load before the file is written.
     """
     text = config_path.read_text()
+    original = text
+    if name in ((yaml.safe_load(text) or {}).get("voices") or {}):
+        raise ValueError(f"Voice '{name}' already exists; config was not changed.")
+    # Removing the last voice leaves an empty mapping, which must accept new entries too.
+    text = re.sub(r"^voices:[ \t]*\{\}([ \t]*(?:#.*)?)$", r"voices:\1", text, flags=re.M)
     lines = text.splitlines(keepends=True)
     voices_at = next((i for i, l in enumerate(lines) if re.match(r"^voices:\s*(#.*)?$", l)), None)
     if voices_at is None:
@@ -299,10 +352,8 @@ def insert_voice_block(config_path: Path, name: str, block: str) -> None:
     data = yaml.safe_load(candidate_text)
     if not isinstance(data, dict) or name not in (data.get("voices") or {}):
         raise SystemExit("Internal error: rewritten config does not contain the new voice; aborting.")
-    backup = config_path.with_suffix(".yaml.bak")
-    shutil.copy2(config_path, backup)
-    config_path.write_text(candidate_text)
-    print(f"Config updated (backup at {backup.name}).")
+    _write_config(config_path, original, candidate_text)
+    print(f"Config updated (backup at {config_path.with_suffix('.yaml.bak').name}).")
 
 
 def add_voice_to_config(
@@ -325,10 +376,123 @@ def add_voice_to_config(
     insert_voice_block(config_path, name, block)
 
 
+def add_selected_model(row: ModelRow, config_path: Path) -> tuple[str, bool]:
+    """Install a Discord search selection without overwriting existing voices."""
+    name = slugify(row.title)[:40]
+    if not VOICE_KEY_RE.fullmatch(name):
+        name = f"voice_{name}"
+    cfg = Config.load(config_path)
+    voice_dir = DEFAULT_MODEL_DIR / name
+    if name in cfg.voices or voice_dir.exists():
+        raise ValueError(f"Voice '{name}' already exists; remove it first or use the CLI with --as.")
+    url = row.zip_url or resolve_download_from_model_page(row.model_id)
+    with tempfile.TemporaryDirectory(prefix="rvc_models_") as tmp:
+        zip_path = download_zip(url, Path(tmp) / "model.zip")
+        # Stage extraction so a failed download/extraction never leaves an installed voice.
+        staged = Path(tmp) / name
+        pth, index = install_model(zip_path, staged, force=False)
+        voice_dir.parent.mkdir(parents=True, exist_ok=True)
+        voice_dir.mkdir()  # Refuse collisions, including concurrent CLI installs.
+        try:
+            for file in staged.iterdir():
+                shutil.move(str(file), voice_dir / file.name)
+            if os.geteuid() == 0:
+                owner = voice_dir.parent.stat()
+                for path in (voice_dir, *voice_dir.iterdir()):
+                    os.chown(path, owner.st_uid, owner.st_gid)
+            add_voice_to_config(
+                config_path, name, voice_dir / pth.name,
+                voice_dir / index.name if index else None,
+                f"{BASE_URL}/model/{row.model_id}", force=False,
+            )
+        except BaseException:
+            shutil.rmtree(voice_dir)
+            raise
+    return name, sync_voice_to_gpu(name, voice_dir)
+
+
+def remove_voice(name: str, config_path: Path) -> list[str]:
+    """Remove a config entry and its unshared, managed model directory.
+
+    Return cleanup warnings; external/shared assets are deliberately retained.
+    """
+    text = config_path.read_text()
+    cfg = Config.load(config_path)
+    if name not in cfg.voices:
+        raise ValueError(f"Unknown voice '{name}'.")
+    voice = cfg.voices[name]
+    root = yaml.compose(text)
+    voices_node = next(v for k, v in root.value if k.value == "voices")
+    if voices_node.flow_style:
+        raise ValueError("Voice removal requires a block-style voices mapping.")
+    key, value = next((k, v) for k, v in voices_node.value if k.value == name)
+    lines = text.splitlines(keepends=True)
+    start = key.start_mark.line
+    end = value.end_mark.line + int(bool(value.flow_style))
+    # Keep comments that introduce the following sibling or top-level setting.
+    while end > start + 1 and (not lines[end - 1].strip() or
+                              re.match(r"^\s{0,2}#", lines[end - 1])):
+        end -= 1
+    del lines[start:end]
+    candidate = "".join(lines)
+    data = yaml.safe_load(candidate)
+    if data.get("voices") is None:
+        candidate = re.sub(r"^voices:([ \t]*(?:#.*)?)$", r"voices: {}\1", candidate, flags=re.M)
+    expected = yaml.safe_load(text)
+    del expected["voices"][name]
+    if yaml.safe_load(candidate) != expected:
+        raise ValueError("Cannot safely remove this config entry; no changes made.")
+    _write_config(config_path, text, candidate)
+
+    warnings = []
+    if not voice.rvc_model:
+        return warnings
+    model_dir = Path(voice.rvc_model).absolute().parent
+    directory = model_dir.resolve()
+    rel = _rel_model_dir(directory)
+    if (model_dir.is_symlink() or directory.parent != DEFAULT_MODEL_DIR.resolve() or
+            not rel or not VOICE_KEY_RE.fullmatch(rel)):
+        return ["Model files outside a managed voice directory were kept."]
+    for other_name, other in cfg.voices.items():
+        if other_name == name:
+            continue
+        for asset in (other.rvc_model, other.rvc_index, other.reference_clip):
+            if asset and (Path(asset).absolute().is_relative_to(directory) or
+                          Path(asset).resolve().is_relative_to(directory)):
+                return ["Model directory is shared by another voice; files were kept on all machines."]
+    for url, dest, timeout, mac, broadcast in sync_targets():
+        if not dest:
+            continue
+        try:
+            if not ensure_awake(url, mac, broadcast, timeout):
+                raise ValueError("GPU server unavailable")
+            host, base = dest.split(":", 1)
+            if (not host or host.startswith("-") or not base.startswith("/") or
+                    ".." in Path(base).parts or len(Path(base).parts) < 2):
+                raise ValueError("Unsafe model-sync destination")
+            remote = f"{base.rstrip('/')}/{rel}"
+            subprocess.run(
+                ["ssh", *SSH_OPTS, host, f"rm -rf -- {shlex.quote(remote)}"],
+                check=True, capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            _report_sync_error(e)
+            warnings.append(f"Remote model cleanup failed for {dest}; remove {rel}/ there manually.")
+    try:
+        if directory.exists():
+            shutil.rmtree(directory)
+    except OSError as e:
+        _report_sync_error(e)
+        warnings.append("Local model files could not be deleted; remove them manually.")
+    return warnings
+
+
 # --- GPU model sync ----------------------------------------------------------
 
 SSH_OPTS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
-SSH_CMD = " ".join(("ssh", *SSH_OPTS))
+if ssh_config := os.getenv("RVC_SYNC_SSH_CONFIG"):
+    SSH_OPTS += ("-F", ssh_config)
+SSH_CMD = shlex.join(("ssh", *SSH_OPTS))
 
 
 def sync_settings() -> tuple[str, str, float, str, str]:
@@ -442,13 +606,13 @@ def _sync_voice_to_gpu(name, src_dir, settings) -> bool:
     if rel is None:
         print(f"Model sync skipped: {src_dir} is outside {DEFAULT_MODEL_DIR}.")
         return False
-    if not ensure_awake(url, mac, broadcast, timeout):
-        print(f"GPU server unavailable: {url} (wake budget {timeout:.0f}s).")
-        return False
-    print(f"Syncing {name} -> {dest}/{rel}/")
     try:
+        if not ensure_awake(url, mac, broadcast, timeout):
+            print(f"GPU server unavailable: {url} (wake budget {timeout:.0f}s).")
+            return False
+        print(f"Syncing {name} -> {dest}/{rel}/")
         sync_voice(src_dir, dest, rel)
-    except (subprocess.SubprocessError, ValueError) as e:
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
         _report_sync_error(e)
         return False
     return True

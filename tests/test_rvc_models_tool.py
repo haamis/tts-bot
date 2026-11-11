@@ -287,3 +287,305 @@ def test_sync_models_syncs_existing_and_skips_rest(monkeypatch, tmp_path):
 
     assert sync_models(["good", "missing", "no-rvc"]) == 1
     assert synced == ["good"]
+
+
+@pytest.fixture
+def model_store(monkeypatch, tmp_path):
+    root = tmp_path / "rvc_models"
+    root.mkdir()
+    cfg = tmp_path / "voices.yaml"
+    cfg.write_text("# header\nvoices: {}\n")
+    monkeypatch.setattr(rvc_models, "DEFAULT_MODEL_DIR", root)
+    monkeypatch.setattr(rvc_models, "sync_targets", lambda: [])
+    return root, cfg
+
+
+def test_selected_model_installs_and_syncs(monkeypatch, model_store, tmp_path):
+    root, cfg = model_store
+    # The normal live config uses a block mapping.
+    cfg.write_text(BASE_CONFIG)
+    archive = make_zip(tmp_path / "m.zip", {"nested/Vegeta.pth": 100, "added.index": 10})
+    monkeypatch.setattr(rvc_models, "download_zip", lambda url, dest: archive)
+    calls = []
+    monkeypatch.setattr(rvc_models, "sync_voice_to_gpu", lambda n, d: calls.append((n, d)) or True)
+    name, synced = rvc_models.add_selected_model(rvc_models.ModelRow("123", "Vegeta", "", "https://x"), cfg)
+    assert (name, synced) == ("vegeta", True)
+    assert calls == [("vegeta", root / "vegeta")]
+    assert (root / "vegeta" / "Vegeta.pth").exists()
+    assert yaml.safe_load(cfg.read_text())["voices"][name]["rvc"]["model"] == str(root / name / "Vegeta.pth")
+
+
+def test_selected_model_resolves_missing_download_link(monkeypatch, model_store, tmp_path):
+    root, cfg = model_store
+    cfg.write_text(BASE_CONFIG)
+    archive = make_zip(tmp_path / "m.zip", {"V.pth": 10})
+    monkeypatch.setattr(rvc_models, "resolve_download_from_model_page", lambda mid: "https://x/zip")
+    def download(url, dest):
+        assert url == "https://x/zip"
+        return archive
+    monkeypatch.setattr(rvc_models, "download_zip", download)
+    assert rvc_models.add_selected_model(rvc_models.ModelRow("123", "123 Vegeta", "", ""), cfg)[0] == "voice_123_vegeta"
+
+
+def test_selected_model_rejects_collision_before_downloading(monkeypatch, model_store):
+    root, cfg = model_store
+    (root / "vegeta").mkdir()
+    monkeypatch.setattr(rvc_models, "download_zip", lambda *a: pytest.fail("should not download"))
+    with pytest.raises(ValueError, match="already exists"):
+        rvc_models.add_selected_model(rvc_models.ModelRow("1", "Vegeta", "", "x"), cfg)
+
+
+def test_failed_config_update_cleans_new_files(monkeypatch, model_store, tmp_path):
+    root, cfg = model_store
+    original = cfg.read_text()
+    archive = make_zip(tmp_path / "m.zip", {"V.pth": 10})
+    monkeypatch.setattr(rvc_models, "download_zip", lambda *a: archive)
+    def fail(*args, **kwargs):
+        raise SystemExit("cannot write config")
+    monkeypatch.setattr(rvc_models, "add_voice_to_config", fail)
+    with pytest.raises(SystemExit):
+        rvc_models.add_selected_model(rvc_models.ModelRow("1", "Vegeta", "", "x"), cfg)
+    assert not (root / "vegeta").exists()
+    assert cfg.read_text() == original
+
+
+def test_yaml_special_chars_in_model_filename_are_quoted(tmp_path):
+    cfg = tmp_path / "voices.yaml"
+    cfg.write_text(BASE_CONFIG)
+    model = Path('/models/new/voice, pitch: 99, file: "x.pth')
+    add_voice_to_config(cfg, "new", model, None, "source\nvoices: hacked", False)
+    entry = yaml.safe_load(cfg.read_text())["voices"]["new"]
+    assert entry["rvc"]["model"] == str(model)
+    assert entry["rvc"]["pitch"] == 0
+
+
+def managed_voice(root, cfg, name="vegeta", directory="vegeta"):
+    model_dir = root / directory
+    model_dir.mkdir(exist_ok=True)
+    model = model_dir / "Voice.pth"
+    model.write_bytes(b"model")
+    cfg.write_text(f"# header\nvoices:\n  {name}:\n    tts: en_US-lessac-medium\n    rvc_model: {model}\n")
+    return model_dir
+
+
+def test_remove_deletes_managed_model_on_both_servers(monkeypatch, model_store):
+    root, cfg = model_store
+    directory = managed_voice(root, cfg, name="vegeta", directory="custom_dir")
+    original = cfg.read_text()
+    monkeypatch.setattr(rvc_models, "sync_targets", lambda: [
+        ("http://4080", "tts-4080:/models", 0, "", ""),
+        ("http://ifrit", "ifrit:/models", 1, "mac", "broadcast"),
+    ])
+    monkeypatch.setattr(rvc_models, "ensure_awake", lambda *a: True)
+    calls = []
+    monkeypatch.setattr(rvc_models.subprocess, "run", lambda args, **kw: calls.append(args))
+    assert rvc_models.remove_voice("vegeta", cfg) == []
+    assert not directory.exists()
+    assert yaml.safe_load(cfg.read_text())["voices"] == {}
+    assert cfg.with_suffix(".yaml.bak").read_text() == original
+    assert [cmd[-2] for cmd in calls] == ["tts-4080", "ifrit"]
+    assert all(cmd[-1] == "rm -rf -- /models/custom_dir" for cmd in calls)
+
+
+def test_remove_preserves_other_entries_and_comments(monkeypatch, model_store):
+    root, cfg = model_store
+    managed_voice(root, cfg)
+    cfg.write_text(cfg.read_text() + "\n  # Snake intro\n  snake:\n    tts: en_US-ryan-medium\n    pitch: -5\n# footer\nextra: value\n")
+    assert rvc_models.remove_voice("vegeta", cfg) == []
+    assert "# header" in cfg.read_text() and "# Snake intro" in cfg.read_text()
+    assert "# footer" in cfg.read_text()
+    data = yaml.safe_load(cfg.read_text())
+    assert data["voices"] == {"snake": {"tts": "en_US-ryan-medium", "pitch": -5}}
+    assert data["extra"] == "value"
+
+
+def test_remove_inline_voice_entry(model_store):
+    root, cfg = model_store
+    cfg.write_text("voices:\n  vegeta: {tts: donor}\n  snake: {tts: other}\n")
+    assert rvc_models.remove_voice("vegeta", cfg) == []
+    assert yaml.safe_load(cfg.read_text())["voices"] == {"snake": {"tts": "other"}}
+
+
+@pytest.mark.parametrize("shared_field", ["rvc_model", "rvc_index", "reference_clip"])
+def test_remove_keeps_shared_directory(model_store, shared_field):
+    root, cfg = model_store
+    directory = managed_voice(root, cfg)
+    cfg.write_text(cfg.read_text() + f"  other:\n    tts: donor\n    {shared_field}: {directory / 'Voice.pth'}\n")
+    assert "shared" in rvc_models.remove_voice("vegeta", cfg)[0]
+    assert directory.exists()
+    assert "other" in yaml.safe_load(cfg.read_text())["voices"]
+
+
+@pytest.mark.parametrize("location", ["external", "root", "nested"])
+def test_remove_never_deletes_outside_managed_child_directory(model_store, tmp_path, location):
+    root, cfg = model_store
+    directory = {"external": tmp_path / "elsewhere", "root": root,
+                 "nested": root / "group" / "voice"}[location]
+    directory.mkdir(parents=True, exist_ok=True)
+    model = directory / "Voice.pth"
+    model.write_bytes(b"keep")
+    cfg.write_text(f"voices:\n  vegeta:\n    tts: donor\n    rvc_model: {model}\n")
+    assert "kept" in rvc_models.remove_voice("vegeta", cfg)[0]
+    assert model.read_bytes() == b"keep"
+
+
+def test_remove_warns_if_offline_but_attempts_other_server(monkeypatch, model_store):
+    root, cfg = model_store
+    directory = managed_voice(root, cfg)
+    monkeypatch.setattr(rvc_models, "sync_targets", lambda: [
+        ("offline", "4080:/models", 0, "", ""),
+        ("online", "ifrit:/models", 0, "", ""),
+    ])
+    monkeypatch.setattr(rvc_models, "ensure_awake", lambda url, *a: url == "online")
+    calls = []
+    monkeypatch.setattr(rvc_models.subprocess, "run", lambda args, **kw: calls.append(args))
+    warnings = rvc_models.remove_voice("vegeta", cfg)
+    assert len(warnings) == 1 and "4080" in warnings[0]
+    assert len(calls) == 1 and calls[0][-2] == "ifrit"
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("base", ["/", "//", "/./", "/models/..", "relative"])
+def test_remove_rejects_unsafe_remote_base(monkeypatch, model_store, base):
+    root, cfg = model_store
+    managed_voice(root, cfg)
+    monkeypatch.setattr(rvc_models, "sync_targets", lambda: [("", f"ifrit:{base}", 0, "", "")])
+    monkeypatch.setattr(rvc_models, "ensure_awake", lambda *a: True)
+    monkeypatch.setattr(rvc_models.subprocess, "run", lambda *a, **kw: pytest.fail("unsafe deletion"))
+    assert "cleanup failed" in rvc_models.remove_voice("vegeta", cfg)[0]
+
+
+def test_remove_unknown_voice_changes_nothing(model_store):
+    root, cfg = model_store
+    original = cfg.read_text()
+    with pytest.raises(ValueError, match="Unknown voice"):
+        rvc_models.remove_voice("missing", cfg)
+    assert cfg.read_text() == original
+
+
+def test_last_voice_can_be_removed_and_another_added(model_store):
+    root, cfg = model_store
+    managed_voice(root, cfg)
+    rvc_models.remove_voice("vegeta", cfg)
+    add_voice_to_config(cfg, "new", root / "new" / "new.pth", None, "test", False)
+    assert list(yaml.safe_load(cfg.read_text())["voices"]) == ["new"]
+
+
+def test_sync_tries_both_targets_even_when_ssh_is_missing(monkeypatch, model_store):
+    root, _ = model_store
+    directory = root / "vegeta"
+    directory.mkdir()
+    monkeypatch.setattr(rvc_models, "sync_targets", lambda: [
+        ("4080", "4080:/models", 0, "", ""), ("ifrit", "ifrit:/models", 0, "", ""),
+    ])
+    monkeypatch.setattr(rvc_models, "ensure_awake", lambda *a: True)
+    calls = []
+    def missing(src, dest, rel):
+        calls.append(dest)
+        raise FileNotFoundError("ssh")
+    monkeypatch.setattr(rvc_models, "sync_voice", missing)
+    assert not rvc_models.sync_voice_to_gpu("vegeta", directory)
+    assert calls == ["4080:/models", "ifrit:/models"]
+
+
+def test_failed_atomic_replace_keeps_original_config(monkeypatch, tmp_path):
+    cfg = tmp_path / "voices.yaml"
+    cfg.write_text(BASE_CONFIG)
+    def fail(*args):
+        raise OSError("disk full")
+    monkeypatch.setattr(rvc_models.os, "replace", fail)
+    with pytest.raises(OSError, match="disk full"):
+        add_voice_to_config(cfg, "new", Path("/model.pth"), None, "test", False)
+    assert cfg.read_text() == BASE_CONFIG
+    assert cfg.with_suffix(".yaml.bak").read_text() == BASE_CONFIG
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["voices.yaml", "voices.yaml.bak", "voices.yaml.lock"]
+
+
+def test_stale_config_edit_is_rejected(tmp_path):
+    cfg = tmp_path / "voices.yaml"
+    cfg.write_text(BASE_CONFIG + "# user's new edit\n")
+    with pytest.raises(ValueError, match="changed during"):
+        rvc_models._write_config(cfg, BASE_CONFIG, "wrong: config\n")
+    assert "user's new edit" in cfg.read_text()
+
+
+def test_atomic_config_write_preserves_mode_and_owner(tmp_path):
+    cfg = tmp_path / "voices.yaml"
+    cfg.write_text(BASE_CONFIG)
+    cfg.chmod(0o640)
+    if rvc_models.os.geteuid() == 0:
+        rvc_models.os.chown(cfg, 1000, 1000)
+    owner = cfg.stat().st_uid
+    add_voice_to_config(cfg, "new", Path("/model.pth"), None, "test", False)
+    assert cfg.stat().st_mode & 0o777 == 0o640
+    assert cfg.stat().st_uid == owner
+    assert cfg.with_suffix(".yaml.lock").stat().st_uid == owner
+    assert cfg.with_suffix(".yaml.bak").stat().st_uid == owner
+
+
+def test_duplicate_is_rejected_at_final_insertion(tmp_path):
+    cfg = tmp_path / "voices.yaml"
+    cfg.write_text(BASE_CONFIG)
+    with pytest.raises(ValueError, match="already exists"):
+        rvc_models.insert_voice_block(cfg, "snake", "  snake: {tts: wrong}\n")
+    assert cfg.read_text() == BASE_CONFIG
+
+
+def test_remove_file_symlink_deletes_link_directory_not_target(model_store):
+    root, cfg = model_store
+    target_dir = root / "keep"
+    target_dir.mkdir()
+    target = target_dir / "Original.pth"
+    target.write_bytes(b"keep")
+    directory = managed_voice(root, cfg)
+    model = directory / "Voice.pth"
+    model.unlink()
+    model.symlink_to(target)
+    assert rvc_models.remove_voice("vegeta", cfg) == []
+    assert not directory.exists()
+    assert target.read_bytes() == b"keep"
+
+
+def test_remove_preserves_symlinked_directory(model_store):
+    root, cfg = model_store
+    directory = managed_voice(root, cfg)
+    alias = root / "alias"
+    alias.symlink_to(directory, target_is_directory=True)
+    cfg.write_text(cfg.read_text().replace(str(directory), str(alias)))
+    assert "kept" in rvc_models.remove_voice("vegeta", cfg)[0]
+    assert directory.exists() and alias.exists()
+
+
+def test_remove_preserves_shared_file_symlink_to_external_asset(model_store, tmp_path):
+    root, cfg = model_store
+    directory = managed_voice(root, cfg)
+    external = tmp_path / "external.pth"
+    external.write_bytes(b"keep")
+    link = directory / "shared.pth"
+    link.symlink_to(external)
+    cfg.write_text(cfg.read_text() + f"  other:\n    tts: donor\n    rvc_model: {link}\n")
+    assert "shared" in rvc_models.remove_voice("vegeta", cfg)[0]
+    assert link.exists()
+
+
+@pytest.mark.parametrize("declared_size", [None, "9"])
+def test_download_size_is_bounded(monkeypatch, tmp_path, declared_size):
+    monkeypatch.setattr(rvc_models, "MAX_MODEL_BYTES", 8)
+    response = SimpleNamespace(
+        headers={"content-length": declared_size} if declared_size else {},
+        raise_for_status=lambda: None,
+        iter_content=lambda **kw: iter([b"12345", b"6789"]),
+    )
+    target = tmp_path / "download.zip"
+    with pytest.raises(ValueError, match="2 GiB"):
+        rvc_models._save_download(response, target)
+    assert not target.exists() or target.stat().st_size <= 8
+
+
+def test_extracted_size_is_bounded_before_creating_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(rvc_models, "MAX_MODEL_BYTES", 8)
+    archive = make_zip(tmp_path / "model.zip", {"model.pth": 5, "model.index": 4})
+    target = tmp_path / "new"
+    with pytest.raises(ValueError, match="Extracted model"):
+        install_model(archive, target, False)
+    assert not target.exists()

@@ -18,7 +18,8 @@ services:
       - "ifrit.local:192.168.1.162"
     volumes:
       - ./config:/app/config
-      - ${RVC_MODELS_HOST_PATH:-./rvc_models}:/home/haama/TTS-bot/rvc_models:ro
+      - ${RVC_MODELS_HOST_PATH:-./rvc_models}:/home/haama/TTS-bot/rvc_models
+      - ${RVC_SYNC_SSH_DIR:-${HOME}/.config/ttsbot/model-sync-ssh}:/run/rvc-model-sync:ro
       - tts_temp:/app/temp
     environment:
       - RVC_MODELS_DIR=/home/haama/TTS-bot/rvc_models

@@ -25,6 +25,8 @@ tests
 !.env.example
 cookies.txt
 cookies.txt.*
+config/voices.yaml.bak
+config/voices.yaml.lock
 rvc_models
 piper_voices
 out

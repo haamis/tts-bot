@@ -159,6 +159,35 @@ Tune the generated entry (pitch/speeds/`cloud_voice`) afterwards and restart
 the bot. Google Drive folder links aren't auto-downloadable — grab the zip
 manually and use `add-zip`.
 
+In Discord, members with **Manage Server** permission can use
+`!addvoice vegeta` and choose a search result from the dropdown. The bot
+installs the selection using a title-derived voice name, updates the config,
+and syncs to both configured GPU machines (ifrit and the preferred 4080).
+The voice is available immediately without restarting. Existing names are
+never overwritten. The menu shows up to 25 first-page results and expires
+after three minutes; only the requester can use it.
+
+`!removevoice <voice>` asks for confirmation, then removes the config entry
+and its model directory locally and on both GPU machines. Shared model
+directories and files outside `rvc_models/<directory>/` are kept. Finish
+running requests before removing a voice. Offline machines may retain files;
+the reply reports incomplete cleanup. Config backups do not back up model files.
+
+Downloads and extracted model files are each limited to 2 GiB. Config writes
+are atomic and reject competing edits rather than overwriting them.
+
+The Docker bot needs writable model storage and SSH/rsync (included in the
+image). Compose mounts `${RVC_SYNC_SSH_DIR:-$HOME/.config/ttsbot/model-sync-ssh}`
+read-only at `/run/rvc-model-sync`. Prepare that directory with:
+- `config`: copy `deploy/bot/model-sync-ssh.conf` (adjust hosts/users as needed).
+- `id_ifrit` and `id_4080`: dedicated SSH identities authorized for model sync, mode 600.
+- `known_hosts`: verified SSH host keys for both targets, including port 2223.
+
+Do not reuse GitHub or administrator identities. The bot does not use your
+SSH agent or mount your whole SSH directory.
+Only install models from trusted authors: legacy RVC checkpoints can execute
+code when loaded. Rebuild/recreate the bot container to apply Docker changes.
+
 ## Running
 
 ```bash
@@ -187,6 +216,8 @@ BOT_DRY_RUN=1
 - `!generate <voice[,voice2,...]> <prompt>` — An LLM (OpenRouter) writes spoken text from your prompt, then it's played through the normal pipeline. One voice gives a monologue (e.g. `!generate trump a rant about tiny keyboards`); comma-separated voices give a multi-voice dialogue where the LLM takes turns (e.g. `!generate trump,snake arguing which is better, burger king or mcdonalds`)
 - `!cancel` — Skip the request currently being processed or playing and move on to the next one in queue (queued requests keep their place). Replies `Nothing to skip` when nothing is running.
 - `!voices` — List available voices
+- `!addvoice <search terms>` — Search, select, install and sync an RVC model (Manage Server required)
+- `!removevoice <voice>` — Confirm removal of a voice and its unshared models (Manage Server required)
 
 ### Slash commands
 - `/speak dialogue:<text>` — Generate and play dialogue

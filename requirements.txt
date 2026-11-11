@@ -5,6 +5,7 @@ openai>=1.40
 aiohttp>=3.9
 python-dotenv>=1.0.0
 pyyaml>=6.0.1
+requests>=2.31
 piper-tts>=1.2.0
 numpy>=1.24.0
 soundfile>=0.12.1

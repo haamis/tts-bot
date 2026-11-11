@@ -67,3 +67,5 @@ reference-*.wav
 # Generated per-voice pitch profiles (tools/analyze_voices.py, keyed by
 # model path + mtime + tuning; regenerate any time)
 config/voice_pitch.json
+config/voices.yaml.bak
+config/voices.yaml.lock
