@@ -15,6 +15,17 @@ adds it before the existing ifrit target, without WoL; transient failures try
 ifrit and then local CPU. Its Docker-managed model-sync SSH is port 2223
 (`tts-4080` SSH alias on boksi); `RVC_GPU_PREFERRED_SYNC_DEST` adds it to model
 sync without replacing ifrit. No WSL portproxy or scheduled task is required.
+Model-sync uses `restart: always` so a prior stopped state does not suppress
+its startup when Docker Desktop restarts. The GPU worker keeps unless-stopped.
+Windows administration is available from boksi as `ssh tts-4080-admin` on
+port 22 (native Windows OpenSSH, Automatic LocalSystem service). It is
+key-only and its firewall rules allow boksi `192.168.1.90` on Private networks.
+Use PowerShell `-EncodedCommand` for scripts and `wsl.exe -e ...` for WSL/
+Docker management (default distro Ubuntu-20.04, user haama); model-sync SSH
+on 2223 remains restricted and has no Docker socket. Native SSH host private
+keys must be owned by SYSTEM/Administrators with access restricted to those
+identities: installer-user-owned keys caused service exit 1067 while the
+same sshd binary worked interactively. Preserve host keys; fix ACLs instead.
 Connection failures skip the preferred desktop for 60s across GPU clients;
 HTTP/data errors do not trigger that cooldown. Connection setup includes a
 5s DNS/connect budget; inference keeps its separate generous request timeout.
@@ -22,6 +33,9 @@ Provision inference assets from ifrit's `~/rvc-gpu-server/rvc_infer/assets/`,
 not just boksi's copy: the 610 MiB PyMSS BS-Roformer checkpoint can exist only
 on ifrit. `/health` and TTS/RVC smoke tests do not verify `/separate`; a missing
 checkpoint silently sends separation to ifrit via the normal 503 fallback.
+GPU pyannote must use `ttsbot_diarize.diarize_pyannote` (shared v3/v4 support),
+not the GPU repo's legacy `ttsbot.media.diarize_pyannote` copy: pyannote 4
+rejects the latter's `use_auth_token`, causing 503 and fallback to ifrit.
 
 **Deployment boundary:** this host is **boksi**, the CPU-only bot host. The live
 bot is Docker container `tts-bot` (`docker-compose.yml`), NOT a host venv process.

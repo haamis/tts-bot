@@ -13,7 +13,7 @@ services:
 
   model-sync:
     build: ./model-sync
-    restart: unless-stopped
+    restart: always
     # 2223 avoids colliding with the temporary WSL SSH bootstrap on 2222.
     ports:
       - "2223:22"

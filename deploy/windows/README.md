@@ -31,6 +31,10 @@ matching the paths sent by the bot. The SSH container can write only its own
 filesystem and the shared voice-model directory; it has no Docker socket or
 access to the server's token/caches. Password login and SSH forwarding are off.
 SSH host keys persist in a Docker volume.
+The model-sync service uses `restart: always`, so Docker startup brings it
+back even if it was left stopped during earlier maintenance or recovery.
+A manual stop still keeps it stopped until explicitly started or Docker
+restarts. No scheduled task is involved.
 
 ## Start
 
@@ -68,6 +72,39 @@ After Docker SSH works, remove the temporary WSL forwarding and its firewall rul
 netsh interface portproxy delete v4tov4 listenaddress=192.168.1.161 listenport=2222
 Remove-NetFirewallRule -DisplayName "WSL SSH from boksi"
 ```
+
+## Administrative access
+
+Windows native OpenSSH provides management access independently of Docker and
+WSL. On boksi, `ssh tts-4080-admin` connects to Windows port 22 as `haama`;
+use `wsl.exe -e ...` to manage Docker and the Linux deployment files. The
+Windows `sshd` service starts automatically as LocalSystem. Access uses a
+dedicated public key, password authentication is disabled for this account,
+and the SSH firewall rules allow only boksi (`192.168.1.90`) on Private networks.
+This is Windows administrator access, not a restricted model-sync shell.
+
+The administrative entry in boksi's `~/.ssh/config` is:
+
+```sshconfig
+Host tts-4080-admin
+    HostName 192.168.1.161
+    User haama
+    Port 22
+    IdentityFile ~/.ssh/id_tts_4080
+    IdentitiesOnly yes
+    HostKeyAlgorithms ssh-ed25519
+```
+
+Verify the Windows host-key fingerprint before trusting this connection.
+
+Keep the model-sync container separate: it still has no Docker socket or
+access to Windows administration. Do not expose either SSH port to the internet.
+
+Windows host private keys in `C:\ProgramData\ssh\ssh_host_*_key` must be owned
+by SYSTEM or Administrators, with access restricted to those identities.
+Generating them as the installing user without correcting permissions caused
+service error 1067, despite successful interactive startup. Correct ownership
+and permissions rather than regenerating keys or disabling security checks.
 
 ## Bot configuration on boksi
 
