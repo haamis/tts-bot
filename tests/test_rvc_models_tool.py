@@ -261,6 +261,46 @@ def test_sync_voice_rejects_dest_without_host(tmp_path):
         sync_voice(tmp_path, "/mirror", "x")
 
 
+def test_reconcile_preferred_skips_a_powered_off_desktop(monkeypatch, tmp_path):
+    monkeypatch.setattr(rvc_models, "preferred_settings", lambda: ("http://4080", "4080:/m", 0, "", ""))
+    monkeypatch.setattr(rvc_models, "DEFAULT_MODEL_DIR", tmp_path)
+    monkeypatch.setattr(rvc_models, "_health_ok", lambda url: False)
+    monkeypatch.setattr(rvc_models.subprocess, "run", lambda *a, **kw: pytest.fail("must not sync"))
+
+    assert rvc_models.reconcile_preferred_models() is False
+
+
+def test_reconcile_preferred_syncs_only_when_models_differ(monkeypatch, tmp_path):
+    monkeypatch.setattr(rvc_models, "preferred_settings", lambda: ("http://4080", "4080:/m", 0, "", ""))
+    monkeypatch.setattr(rvc_models, "DEFAULT_MODEL_DIR", tmp_path)
+    monkeypatch.setattr(rvc_models, "_health_ok", lambda url: True)
+    monkeypatch.setattr(rvc_models, "load_dotenv", lambda *a, **k: None)
+    calls = []
+    drift = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(stdout="<f+++++++++ vegeta/Vegeta.pth\n" if drift else "")
+
+    monkeypatch.setattr(rvc_models.subprocess, "run", run)
+
+    assert rvc_models.reconcile_preferred_models() is True
+    assert [c[0] for c in calls] == ["rsync"] and "--dry-run" in calls[0]
+
+    drift.append(1)
+    assert rvc_models.reconcile_preferred_models() is True
+    assert "--dry-run" in calls[1] and "--delay-updates" in calls[2]
+    assert calls[2][-2] == f"{tmp_path}/" and calls[2][-1] == "4080:/m/"
+
+
+
+def test_reconcile_preferred_unconfigured_is_a_noop(monkeypatch):
+    monkeypatch.setattr(rvc_models, "preferred_settings", lambda: None)
+    monkeypatch.setattr(rvc_models.subprocess, "run", lambda *a, **kw: pytest.fail("must not sync"))
+
+    assert rvc_models.reconcile_preferred_models() is True
+
+
 def test_sync_models_syncs_existing_and_skips_rest(monkeypatch, tmp_path):
     root = tmp_path / "rvc_models"
     good_dir = root / "good"

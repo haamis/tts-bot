@@ -147,7 +147,11 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
   absolute path (dest derived from `RVC_GPU_SERVER_URL`; override with
   `RVC_GPU_MODEL_SYNC_DEST`). `sync [name ...]` retries/reconciles. A sync
   failure leaves the voice local-only; remote RVC returns 400 for it until
-  synced. Do not add models directly on ifrit.
+  synced. The bot also reconciles the preferred desktop by itself: before
+  each request it tries that server (never woken), and when `/health` answers
+  it rsync-dry-runs `rvc_models/` and copies any missing files — at most once
+  per 60s after a failure, 300s after a clean check. Do not add models
+  directly on ifrit.
 - Discord model management needs a writable model mount and SSH/rsync in the
   bot image. Compose mounts `~/.config/ttsbot/model-sync-ssh` (override
   `RVC_SYNC_SSH_DIR`) read-only at `/run/rvc-model-sync`; only sync identities,

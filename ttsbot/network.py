@@ -14,7 +14,7 @@ _preferred_failed_until: dict[str, float] = {}
 
 
 class PreferredGpuUnavailable(RuntimeError):
-    """The always-on desktop recently failed to connect; try ifrit instead."""
+    """The preferred desktop recently failed to connect; try ifrit instead."""
 
 
 @contextmanager

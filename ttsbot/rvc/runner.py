@@ -11,6 +11,7 @@ from contextlib import nullcontext
 import aiohttp
 
 from ttsbot.network import ensure_awake, preferred_gpu_attempt
+from tools import rvc_models
 
 log = logging.getLogger("ttsbot.rvc")
 
@@ -28,6 +29,37 @@ class RVCRequestError(Exception):
 
 class WorkerCrashed(Exception):
     """Worker process crash, protocol desync, or timeout."""
+
+
+# The preferred desktop is switched off most of the time, so its voice models
+# are reconciled only while /health answers, at most once per interval: longer
+# after a clean check, shorter after a failure so a model added while it was
+# off lands on a later request instead of returning 400 forever.
+_PREFERRED_RECHECK_OK = 300.0
+_PREFERRED_RECHECK_FAILED = 60.0
+_preferred_check_at = 0.0
+_preferred_check_lock = asyncio.Lock()
+
+
+async def _reconcile_preferred_models() -> None:
+    """Copy missing voice models to the preferred desktop while it is up."""
+    global _preferred_check_at
+    loop = asyncio.get_running_loop()
+    if loop.time() < _preferred_check_at:
+        return
+    async with _preferred_check_lock:
+        if loop.time() < _preferred_check_at:
+            return
+        # Hold the window closed while syncing so parallel requests pass
+        # straight through instead of queueing behind a multi-GB copy.
+        _preferred_check_at = loop.time() + _PREFERRED_RECHECK_OK
+        try:
+            ok = await asyncio.to_thread(rvc_models.reconcile_preferred_models)
+        except Exception as e:  # a model sync must never fail the request
+            log.warning("Preferred GPU model reconcile failed: %s", e)
+            ok = False
+        if not ok:
+            _preferred_check_at = loop.time() + _PREFERRED_RECHECK_FAILED
 
 
 class RvcRunner:
@@ -168,6 +200,8 @@ class RvcRunner:
             try:
                 attempt = preferred_gpu_attempt(runner.server_url) if runner is self.preferred else nullcontext()
                 with attempt:
+                    if runner is self.preferred:
+                        await _reconcile_preferred_models()
                     result = await getattr(runner, method)(*args)
                 self.last_via = "remote"
                 return result

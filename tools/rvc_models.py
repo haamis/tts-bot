@@ -17,8 +17,9 @@ manually and use `add-zip`.
 
 After installing, the tool wakes the GPU box (WOL) and rsyncs the voice dir
 to the same absolute path there, so remote inference works without a shared
-mount. `sync` retries/reconciles; `--no-sync` installs locally only.
-Restart the bot afterwards to pick up the new voice.
+mount. `sync` retries/reconciles; `--no-sync` installs locally only. The bot
+also reconciles the preferred desktop's models by itself whenever its /health
+answers (it is never woken). Restart the bot afterwards to pick up the new voice.
 """
 import argparse
 import fcntl
@@ -517,18 +518,28 @@ def sync_settings() -> tuple[str, str, float, str, str]:
     )
 
 
+def preferred_settings() -> tuple[str, str, float, str, str] | None:
+    """Sync settings for the preferred desktop, or None when not configured.
+
+    It never gets WoL: timeout 0 and no MAC mean "probe once, give up".
+    """
+    url = os.getenv("RVC_GPU_PREFERRED_URL", "").rstrip("/")
+    dest = os.getenv("RVC_GPU_PREFERRED_SYNC_DEST", "").strip().rstrip("/")
+    if not (url or dest):
+        return None
+    if not dest:
+        host = urlparse(url).hostname
+        if not host:
+            raise ValueError("RVC_GPU_PREFERRED_URL must include a hostname")
+        dest = f"{host}:{DEFAULT_MODEL_DIR}"
+    return url, dest, 0, "", ""
+
+
 def sync_targets():
     """Mirror to both desktops; the preferred desktop never gets WoL."""
     fallback = sync_settings()  # Also loads .env.
-    url = os.getenv("RVC_GPU_PREFERRED_URL", "").rstrip("/")
-    dest = os.getenv("RVC_GPU_PREFERRED_SYNC_DEST", "").strip().rstrip("/")
-    if url or dest:
-        if not dest:
-            host = urlparse(url).hostname
-            if not host:
-                raise ValueError("RVC_GPU_PREFERRED_URL must include a hostname")
-            dest = f"{host}:{DEFAULT_MODEL_DIR}"
-        yield url, dest, 0, "", ""
+    if preferred := preferred_settings():
+        yield preferred
     yield fallback
 
 
@@ -589,6 +600,52 @@ def sync_voice(src_dir: Path, dest: str, rel: str) -> None:
 def _report_sync_error(e: Exception) -> None:
     detail = (getattr(e, "stderr", "") or str(e)).strip().splitlines()
     print(f"Model sync failed: {detail[-1] if detail else e}")
+
+
+def _models_differ(dest: str) -> bool:
+    """True when rsync would transfer files to `dest` (dry run, no data moves)."""
+    out = subprocess.run(
+        ["rsync", "-a", "--dry-run", "--itemize-changes", "-e", SSH_CMD,
+         f"{DEFAULT_MODEL_DIR}/", f"{dest}/"],
+        check=True, capture_output=True, text=True, timeout=300,
+    ).stdout
+    # We are the sender, so pending transfers are "<f"; directory timestamps
+    # churn on every touch and must not trigger a sync.
+    return any(line.startswith("<f") for line in out.splitlines())
+
+
+def reconcile_preferred_models() -> bool:
+    """Bring the preferred desktop's model tree in sync while it is powered on.
+
+    Probes /health first, so an off machine is skipped silently (never woken)
+    and nothing touches the network otherwise. Returns True when the desktop
+    answered and its models match; False when it was unreachable or the sync
+    failed.
+    """
+    load_dotenv(PROJECT_ROOT / ".env")  # CLI/bot may not have it in the environment
+    settings = preferred_settings()
+    if not settings:
+        return True
+    url, dest = settings[0], settings[1]
+    if not _health_ok(url):
+        return False
+    try:
+        if not DEFAULT_MODEL_DIR.is_dir():
+            print(f"Model sync skipped: {DEFAULT_MODEL_DIR} does not exist.")
+            return False
+        if not _models_differ(dest):
+            return True
+        print(f"Voice models out of sync; syncing -> {dest}/")
+        subprocess.run(
+            ["rsync", "-a", "--delay-updates", "-e", SSH_CMD,
+             f"{DEFAULT_MODEL_DIR}/", f"{dest}/"],
+            check=True, capture_output=True, text=True, timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        _report_sync_error(e)
+        return False
+    print(f"Voice models synced -> {dest}/")
+    return True
 
 
 def sync_voice_to_gpu(name: str, src_dir: Path) -> bool:

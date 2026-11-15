@@ -68,8 +68,10 @@ class VoiceModelView(discord.ui.View):
                     name, synced = await asyncio.to_thread(rvc_models.add_selected_model, row, CONFIG_PATH)
                     text = f"✅ Added **{name}**. Available immediately."
                     if not synced:
-                        text += (f" ⚠️ Not synced to every GPU machine; retry on the host: "
-                                 f"`python tools/rvc_models.py sync {name}`. Remote conversion may fail until synced.")
+                        text += (f" ⚠️ Not synced to every GPU machine. The bot re-syncs the "
+                                 f"powered-off desktop automatically once it is reachable; force it "
+                                 f"with `python tools/rvc_models.py sync {name}`. Remote conversion "
+                                 f"may fail until synced.")
                 else:
                     warnings = await asyncio.to_thread(rvc_models.remove_voice, self.name, CONFIG_PATH)
                     text = f"✅ Removed **{self.name}**."

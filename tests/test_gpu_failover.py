@@ -249,3 +249,21 @@ def test_model_sync_rejects_preferred_url_without_host(monkeypatch):
     monkeypatch.delenv("RVC_GPU_PREFERRED_SYNC_DEST", raising=False)
     with pytest.raises(ValueError, match="must include a hostname"):
         list(rvc_models.sync_targets())
+
+
+async def test_preferred_model_reconcile_is_single_flight_and_rate_limited(monkeypatch):
+    from ttsbot.rvc import runner as rvc_runner
+
+    monkeypatch.setattr(rvc_runner, "_preferred_check_at", 0.0)
+    calls = []
+
+    def reconcile():
+        calls.append(1)
+        return False  # unreachable desktop: retried sooner, not every request
+
+    monkeypatch.setattr(rvc_runner.rvc_models, "reconcile_preferred_models", reconcile)
+
+    await rvc_runner._reconcile_preferred_models()
+    await rvc_runner._reconcile_preferred_models()
+    assert calls == [1]  # still inside the short retry window
+
