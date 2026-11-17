@@ -932,8 +932,14 @@ def load_profiles(path) -> dict[str, dict]:
 def save_profiles(path, profiles: dict[str, dict]) -> None:
     import json
 
-    with open(path, "w") as f:
-        json.dump(profiles, f, indent=2, sort_keys=True)
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(profiles, indent=2, sort_keys=True))
+    if os.geteuid() == 0:
+        # The bot writes this as root; keep the file editable by the host user.
+        owner = (path if path.exists() else path.parent).stat()
+        os.chown(temporary, owner.st_uid, owner.st_gid)
+    os.replace(temporary, path)
 
 
 def profile_key(voice_cfg, model_mtime: float) -> dict:
