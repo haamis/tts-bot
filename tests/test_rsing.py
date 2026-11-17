@@ -25,7 +25,7 @@ async def test_multivoice_rsing_looks_up_pitch_profiles(monkeypatch, tmp_path):
         for cfg, f0 in zip(voices, (100.0, 200.0))
     }
     monkeypatch.setattr(diarize, "load_profiles", lambda path: profiles)
-    bot = SimpleNamespace(_diarize=AsyncMock())
+    bot = SimpleNamespace(_diarize_with_retry=AsyncMock())
     status = AsyncMock()
     cancel = asyncio.Event()
     cancel.set()  # Stop after profile lookup and diarization; no audio/GPU needed.
@@ -35,6 +35,6 @@ async def test_multivoice_rsing_looks_up_pitch_profiles(monkeypatch, tmp_path):
             bot, "vocals.wav", voices, tmp_path, status, cancel=cancel
         )
 
-    bot._diarize.assert_awaited_once_with(
+    bot._diarize_with_retry.assert_awaited_once_with(
         "vocals.wav", ["low", "high"], {"low": 100.0, "high": 200.0}, status
     )

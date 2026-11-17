@@ -262,3 +262,85 @@ def test_diarize_no_url_uses_local(tmp_path, monkeypatch):
         TTSBot._diarize(ns, "/tmp/whatever.wav", ["a"], {"a": 200.0}, _noop_status)
     )
     assert result is sentinel
+
+
+# --- merge retry: pyannote collapses, pitch-aware engine splits -------------
+
+
+def _result(detected, mapping):
+    return SimpleNamespace(detected=detected, voice_of_cluster=mapping)
+
+
+@pytest.mark.parametrize("env, use", [
+    ({"RVC_DIARIZE_ENGINE": "auto", "HF_TOKEN": "t"}, "auto"),
+    ({"RVC_DIARIZE_ENGINE": "pyannote", "HF_TOKEN": "t"}, "pinned"),
+    ({"RVC_DIARIZE_ENGINE": "auto", "HF_TOKEN": ""}, "no-token"),
+])
+def test_merged_speakers_retry_only_in_auto_mode(monkeypatch, env, use):
+    calls = []
+
+    async def fake_diarize(path, names, f0, status, engine_override=None):
+        calls.append(engine_override)
+        return _result(1 if engine_override is None else 4, {0: "a"} if engine_override is None else {i: n for i, n in enumerate(names)})
+
+    ns = SimpleNamespace(env={**{"RVC_DIARIZE_THRESHOLD": 0.35}, **env},
+                         _diarize=fake_diarize)
+    result = asyncio.run(
+        TTSBot._diarize_with_retry(ns, "x.wav", ["a", "b", "c", "d"], {}, _noop_status)
+    )
+    if use == "auto":
+        assert calls == [None, "local"]
+        assert result.detected == 4
+    else:
+        assert calls == [None]
+        assert result.detected == 1
+
+
+def test_retry_keeps_the_first_result_when_it_finds_no_more_speakers():
+    async def fake_diarize(path, names, f0, status, engine_override=None):
+        return _result(1, {0: "a"})
+
+    ns = SimpleNamespace(env={"RVC_DIARIZE_ENGINE": "auto", "HF_TOKEN": "t"},
+                         _diarize=fake_diarize)
+    result = asyncio.run(
+        TTSBot._diarize_with_retry(ns, "x.wav", ["a", "b"], {}, _noop_status)
+    )
+    assert result.detected == 1
+
+
+def test_retry_failure_keeps_the_first_result():
+    async def fake_diarize(path, names, f0, status, engine_override=None):
+        if engine_override:
+            raise ValueError("no speech detected")
+        return _result(1, {0: "a"})
+
+    ns = SimpleNamespace(env={"RVC_DIARIZE_ENGINE": "auto", "HF_TOKEN": "t"},
+                         _diarize=fake_diarize)
+    result = asyncio.run(
+        TTSBot._diarize_with_retry(ns, "x.wav", ["a", "b"], {}, _noop_status)
+    )
+    assert result.detected == 1
+
+
+def test_no_retry_when_every_requested_voice_got_a_speaker():
+    calls = []
+
+    async def fake_diarize(path, names, f0, status, engine_override=None):
+        calls.append(engine_override)
+        return _result(2, {0: "a", 1: "b"})
+
+    ns = SimpleNamespace(env={"RVC_DIARIZE_ENGINE": "auto", "HF_TOKEN": "t"},
+                         _diarize=fake_diarize)
+    result = asyncio.run(
+        TTSBot._diarize_with_retry(ns, "x.wav", ["a", "b"], {}, _noop_status)
+    )
+    assert calls == [None]
+    assert result.detected == 2
+
+
+def test_unused_voices_note_names_the_skipped_voices():
+    result = _result(1, {0: "meiling"})
+    note = TTSBot._unused_voices_note(result, ["snake", "otacon", "meryl", "meiling"])
+    assert "Only 1 speaker(s) matched" in note
+    assert "unused: snake, otacon, meryl" in note
+    assert TTSBot._unused_voices_note(_result(2, {0: "a", 1: "b"}), ["a", "b"]) == ""

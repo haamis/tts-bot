@@ -581,9 +581,9 @@ class TTSBot(commands.Bot):
                 try:
                     await self.player.connect(voice_channel)
                     if diar_result is not None:
-                        voice_names = ", ".join(voices)
                         await set_status(
-                            f"🔊 Playing {diar_result.detected}-speaker ({voice_names}) conversion..."
+                            f"🔊 Playing {diar_result.detected}-speaker "
+                            f"({diarize.result_summary(diar_result)}) conversion..."
                         )
                     else:
                         await set_status(f"🔊 Playing **{voices[0]}** conversion...")
@@ -591,6 +591,7 @@ class TTSBot(commands.Bot):
                     if diar_result is not None:
                         await set_status(
                             f"✅ Done. ({diarize.result_summary(diar_result)})"
+                            f"{self._unused_voices_note(diar_result, voices)}"
                             f"{self._rvc_slow_path_note()}"
                         )
                     else:
@@ -710,6 +711,7 @@ class TTSBot(commands.Bot):
                         source_path, vocals_path, instrumental_path
                     )
 
+                    diar_result = None
                     if len(voice_cfgs) == 1:
                         # Single voice: convert entire vocals track
                         await set_status(f"⏳ Converting vocals to **{voice_cfgs[0].name}**{dur_note}...")
@@ -780,13 +782,22 @@ class TTSBot(commands.Bot):
 
                 try:
                     await self.player.connect(voice_channel)
-                    if len(voice_cfgs) == 1:
-                        await set_status(f"🔊 Playing **{voices[0]}** (rsing)...")
+                    if diar_result is not None:
+                        await set_status(
+                            f"🔊 Playing {diar_result.detected}-speaker "
+                            f"({diarize.result_summary(diar_result)}) rsing..."
+                        )
                     else:
-                        voice_names = ", ".join(voices)
-                        await set_status(f"🔊 Playing {len(voice_cfgs)}-voice ({voice_names}) rsing...")
+                        await set_status(f"🔊 Playing **{voices[0]}** (rsing)...")
                     await self.player.play_sequence(voice_channel, [str(final_path)], cancel=cancel)
-                    await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
+                    if diar_result is not None:
+                        await set_status(
+                            f"✅ Done. ({diarize.result_summary(diar_result)})"
+                            f"{self._unused_voices_note(diar_result, voices)}"
+                            f"{self._rvc_slow_path_note()}"
+                        )
+                    else:
+                        await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
                 except RequestCancelled:
                     raise
                 except Exception as e:
@@ -812,7 +823,9 @@ class TTSBot(commands.Bot):
         profiles = diarize.load_profiles(PROJECT_ROOT / "config" / "voice_pitch.json")
         voice_f0 = diarize.voice_f0_map(profiles, voices)
         await set_status("⏳ Detecting speakers in vocals...")
-        result = await self._diarize(vocals_path, [c.name for c in voices], voice_f0, set_status)
+        result = await self._diarize_with_retry(
+            vocals_path, [c.name for c in voices], voice_f0, set_status
+        )
         if cancel is not None and cancel.is_set():
             raise RequestCancelled("cancelled")
 
@@ -966,7 +979,8 @@ class TTSBot(commands.Bot):
 
         raise RuntimeError(f"All VC engines failed for {voice_cfg.name}: {last_error}")
 
-    async def _diarize(self, source_path: str, voice_names: list[str], voice_f0, set_status):
+    async def _diarize(self, source_path: str, voice_names: list[str], voice_f0, set_status,
+                       engine_override: str | None = None):
         """Multi-voice speaker diarization via the configured engine.
 
         Remote-first when RVC_GPU_SERVER_URL is set: the server returns
@@ -988,7 +1002,7 @@ class TTSBot(commands.Bot):
         from ttsbot.media import diarize_pyannote
         from ttsbot.media.diarize_remote import diarize_remote
 
-        engine = self.env["RVC_DIARIZE_ENGINE"]
+        engine = engine_override or self.env["RVC_DIARIZE_ENGINE"]
         threshold = self.env["RVC_DIARIZE_THRESHOLD"]
         resolved = (
             "pyannote"
@@ -1056,6 +1070,35 @@ class TTSBot(commands.Bot):
             threshold,
         )
 
+    async def _diarize_with_retry(self, source_path: str, voice_names: list[str], voice_f0, set_status):
+        """Diarize, and re-run the pitch-aware engine when pyannote merges voices.
+
+        pyannote's embedding clustering merges close voices on music-bedded or
+        heavily edited audio (a four-voice YouTube Poop clip landed on one
+        speaker). The f0-aware local engine separates those, and on genuinely
+        single-speaker audio it also collapses to one cluster, so the retry can
+        only add speakers, never invent them. Pinned engines are respected.
+        """
+        result = await self._diarize(source_path, voice_names, voice_f0, set_status)
+        if (len(voice_names) < 2 or result.detected >= len(voice_names)
+                or self.env["RVC_DIARIZE_ENGINE"] != "auto" or not self.env["HF_TOKEN"]):
+            return result
+        await set_status(
+            f"⏳ Only {result.detected} speaker(s) found; retrying with the pitch-aware engine..."
+        )
+        try:
+            retry = await self._diarize(source_path, voice_names, voice_f0, set_status,
+                                        engine_override="local")
+        except Exception as e:  # a retry must never lose the first result
+            log.warning("Pitch-aware diarization retry failed (%s); keeping %s speaker(s)",
+                        e, result.detected)
+            return result
+        if retry.detected > result.detected:
+            log.info("pyannote merged speakers (%s); pitch-aware engine found %s — using it",
+                     result.detected, retry.detected)
+            return retry
+        return result
+
     async def _convert_multivoice(self, source_path: str, voices: list, workdir, set_status, cancel: asyncio.Event | None = None):
         """Diarize media, convert each speech segment with its assigned
         voice, keep original audio in the gaps, reassemble one file.
@@ -1063,7 +1106,9 @@ class TTSBot(commands.Bot):
         profiles = diarize.load_profiles(PROJECT_ROOT / "config" / "voice_pitch.json")
         voice_f0 = diarize.voice_f0_map(profiles, voices)
         await set_status("⏳ Detecting speakers...")
-        result = await self._diarize(source_path, [c.name for c in voices], voice_f0, set_status)
+        result = await self._diarize_with_retry(
+            source_path, [c.name for c in voices], voice_f0, set_status
+        )
         if cancel is not None and cancel.is_set():
             raise RequestCancelled("cancelled")
 
@@ -1261,6 +1306,16 @@ class TTSBot(commands.Bot):
         if remote_configured and self.pipeline.rvc.last_via in ("worker", "subprocess"):
             return " ⚠️ GPU server unreachable — used local slow path"
         return ""
+
+    @staticmethod
+    def _unused_voices_note(result, voices: list[str]) -> str:
+        """Status suffix naming requested voices the diarizer never used."""
+        used = set(result.voice_of_cluster.values())
+        unused = [v for v in voices if v not in used]
+        if not unused:
+            return ""
+        return (f" ⚠️ Only {result.detected} speaker(s) matched; "
+                f"unused: {', '.join(unused)}")
 
     async def _process_generate(
         self,

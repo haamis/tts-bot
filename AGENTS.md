@@ -215,7 +215,12 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 - Multi-voice `!rvc` diarization: `RVC_DIARIZE_THRESHOLD` (default 0.35,
   calibrated on real clips; 0 = force K clusters, no collapse). wav2vec2
   weights (~360MB) download once to `~/.cache/torch` and load lazily per
-  command. f0 estimation uses RMVPE from the RVC submodule (lazy, cached);
+  command. pyannote (auto + `HF_TOKEN`) merges close voices on music-bedded
+  or edited audio — a four-character YouTube Poop clip came back as one
+  speaker — so when it finds fewer speakers than requested voices the bot
+  retries once with the f0-aware local engine (remote first) and keeps that
+  result only if it separates more speakers; pinned engines are not retried.
+  f0 estimation uses RMVPE from the RVC submodule (lazy, cached);
   pyin is only a fallback — pyin drowns under music beds (floor-pins or
   drops 44% of windows on music-bedded clips) and octave-doubles ambiguous
   frames, RMVPE returns 0 for unvoiced instead of guessing. Per-window f0
