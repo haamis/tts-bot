@@ -267,7 +267,8 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to both GPU 
   BEFORE the force-merge so noise can't push a real speaker out. Clusters
   ≤ K always; leftover clusters keep ORIGINAL audio.
   `config/voice_pitch.json` is generated (gitignored); profiles are keyed
-  by model path+mtime+pitch+f0_method+estimator and go stale automatically.
+  by model path+mtime+pitch+f0_method+estimator and go stale automatically;
+  `!removevoice` deletes the voice's entry.
 - `!generate` with one voice produces a single `Turn` directly (bypasses tag
   parsing, so a stray `%` in LLM text can't reroute voices). With several
   comma-separated voices (`_resolve_voice_spec`) the LLM is prompted for

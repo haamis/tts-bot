@@ -422,6 +422,15 @@ def add_selected_model(row: ModelRow, config_path: Path, name: str | None = None
     return name, sync_voice_to_gpu(name, voice_dir)
 
 
+def _drop_pitch_profile(profiles_path: Path, name: str) -> None:
+    """Forget a removed voice's pitch profile so the cache cannot grow stale."""
+    from ttsbot.media.diarize import load_profiles, save_profiles
+
+    profiles = load_profiles(profiles_path)
+    if profiles.pop(name, None) is not None:
+        save_profiles(profiles_path, profiles)
+
+
 def remove_voice(name: str, config_path: Path) -> list[str]:
     """Remove a config entry and its unshared, managed model directory.
 
@@ -454,6 +463,7 @@ def remove_voice(name: str, config_path: Path) -> list[str]:
     if yaml.safe_load(candidate) != expected:
         raise ValueError("Cannot safely remove this config entry; no changes made.")
     _write_config(config_path, text, candidate)
+    _drop_pitch_profile(config_path.parent / "voice_pitch.json", name)
 
     warnings = []
     if not voice.rvc_model:

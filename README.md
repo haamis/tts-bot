@@ -172,8 +172,8 @@ The voice is available immediately without restarting. Existing names are
 never overwritten. The menu shows up to 25 first-page results and expires
 after three minutes; only the requester can use it.
 
-`!removevoice <voice>` asks for confirmation, then removes the config entry
-and its model directory locally and on both GPU machines. Shared model
+`!removevoice <voice>` asks for confirmation, then removes the config entry,
+its pitch profile and its model directory locally and on both GPU machines. Shared model
 directories and files outside `rvc_models/<directory>/` are kept. Finish
 running requests before removing a voice. Offline machines may retain files;
 the reply reports incomplete cleanup. Config backups do not back up model files.

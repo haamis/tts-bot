@@ -1,3 +1,4 @@
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -662,3 +663,22 @@ def test_extracted_size_is_bounded_before_creating_directory(monkeypatch, tmp_pa
     with pytest.raises(ValueError, match="Extracted model"):
         install_model(archive, target, False)
     assert not target.exists()
+
+
+def test_remove_drops_the_voice_pitch_profile(model_store):
+    root, cfg = model_store
+    managed_voice(root, cfg)
+    profiles = cfg.parent / "voice_pitch.json"
+    profiles.write_text(json.dumps({
+        "vegeta": {"f0": 189.4, "key": {}},
+        "snake": {"f0": 109.4, "key": {}},
+    }))
+    assert rvc_models.remove_voice("vegeta", cfg) == []
+    assert json.loads(profiles.read_text()) == {"snake": {"f0": 109.4, "key": {}}}
+
+
+def test_remove_without_a_pitch_profile_file_is_fine(model_store):
+    root, cfg = model_store
+    managed_voice(root, cfg)
+    assert rvc_models.remove_voice("vegeta", cfg) == []
+    assert not (cfg.parent / "voice_pitch.json").exists()
