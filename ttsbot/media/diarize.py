@@ -935,9 +935,12 @@ def save_profiles(path, profiles: dict[str, dict]) -> None:
     path = Path(path)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(profiles, indent=2, sort_keys=True))
+    # Keep the existing mode and owner: the host user and the root-running bot
+    # both write this file, and a temp file starts as 0644/root.
+    owner = path.stat() if path.exists() else path.parent.stat()
+    if path.exists():
+        os.chmod(temporary, owner.st_mode & 0o777)
     if os.geteuid() == 0:
-        # The bot writes this as root; keep the file editable by the host user.
-        owner = (path if path.exists() else path.parent).stat()
         os.chown(temporary, owner.st_uid, owner.st_gid)
     os.replace(temporary, path)
 
