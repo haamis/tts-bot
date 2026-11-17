@@ -6,10 +6,20 @@ Operational knowledge beyond the user-facing README. Read this before making cha
 
 Discord bot: multi-turn dialogue TTS with RVC voice conversion. `!speak %voice text`,
 `!generate <voice> <prompt>` (OpenRouter LLM), `!rvc <voice> <url>` (yt-dlp + RVC).
-Python 3.12, CPU-only bot host (4C/8T, 16GB RAM, AMD 2400GE thin client).
-GPU inference runs on ifrit (RTX 2060, 6GB) via the Dockerized server.
+Python 3.12.
 
-Optional preferred worker: Windows desktop `192.168.1.161` (RTX 4080), Docker
+**Machines — keep these straight:**
+- **boksi** (this host, `192.168.1.90`): CPU-only bot host, 4C/8T 16GB AMD
+  2400GE thin client. Runs the `tts-bot` container; no GPU.
+- **ifrit** (`192.168.1.162`): the GPU server, **RTX 2060 6GB**, from
+  `~/rvc-gpu-server` (container `rvc-server`); WoL-capable.
+- **Windows desktop** (`192.168.1.161`): **RTX 4080**, optional *preferred*
+  worker via Docker Desktop / WSL2; never woken.
+Every remote RVC / diarization / TTS call goes preferred 4080 → ifrit 2060 →
+local CPU on boksi. `RVC_GPU_SERVER_*` addresses ifrit, `RVC_GPU_PREFERRED_*`
+addresses the 4080. ifrit is not the 4080, and the 4080 is not ifrit.
+
+Optional preferred worker: the Windows desktop above, Docker
 Desktop / WSL2, `deploy/windows/compose.yaml`. `RVC_GPU_PREFERRED_URL/TOKEN`
 adds it before the existing ifrit target, without WoL; transient failures try
 ifrit and then local CPU. Its Docker-managed model-sync SSH is port 2223
@@ -61,8 +71,8 @@ or start a GPU server on boksi. Rebuild/recreate Docker to deploy code; `restart
 does not pick up a new image or changed `.env`. **Deploying is the user's call:**
 never rebuild or recreate the `tts-bot` container unless they explicitly ask —
 commit and push, then stop. A recreate also throws away the container's
-writable layer (see the wav2vec2 cache note under diarization). Venv is for
-local tests only.
+writable layer; only the mounted paths (config, models, piper voices,
+`tts_torch_cache`) survive. Venv is for local tests only.
 
 ## Commands
 
@@ -72,8 +82,8 @@ pytest tests/ -q                # 175 tests, NO network (providers/LLM mocked)
 python test_pipeline.py         # e2e Piper->RVC check, ~1-2 min, asserts audio validity
 BOT_DRY_RUN=1 python -m ttsbot.bot   # full pipeline, no Discord connection
 python -m ttsbot.bot            # live bot (needs real DISCORD_TOKEN in .env)
-python tools/rvc_models.py add ...   # download + config + sync to the GPU box
-python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU box
+python tools/rvc_models.py add ...   # download + config + sync to both GPU machines
+python tools/rvc_models.py sync      # retry/reconcile voice models to both GPU machines
 ```
 
 ## Layout
@@ -219,9 +229,10 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 - Multi-voice `!rvc` diarization: `RVC_DIARIZE_THRESHOLD` (default 0.35,
   calibrated on real clips; 0 = force K clusters, no collapse). wav2vec2
   weights (~360MB) download once to `~/.cache/torch` and load lazily per
-  command — inside the bot container that is `/root/.cache/torch`, part of the
-  writable layer, so a recreated container downloads them again (a volume would
-  keep them). pyannote (auto + `HF_TOKEN`) merges close voices on music-bedded
+  command — inside the bot container that is `/root/.cache/torch`, which the
+  `tts_torch_cache` compose volume keeps across recreates (without it every
+  recreate re-downloads them on the first local diarization). pyannote
+  (auto + `HF_TOKEN`) merges close voices on music-bedded
   or edited audio — a four-character YouTube Poop clip came back as one
   speaker — so when it finds fewer speakers than requested voices the bot
   retries once with the f0-aware local engine (remote first) and keeps that

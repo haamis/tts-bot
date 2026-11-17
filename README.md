@@ -150,9 +150,10 @@ python tools/rvc_models.py add "solid snake" --pick 1 --as snake_mgs1
 python tools/rvc_models.py add-zip ~/Downloads/Billy.zip --as billy  # manual download (Google Drive folders)
 ```
 
-After installing, the tool wakes the GPU box (WOL) and rsyncs the new voice
-to the same absolute path there using your existing SSH key, so remote
-inference works without a shared mount. `--no-sync` installs locally only;
+After installing, the tool wakes ifrit (WOL) and rsyncs the new voice to both
+GPU machines (preferred 4080 desktop and ifrit) at the same absolute path,
+using your existing SSH key, so remote inference works without a shared mount.
+`--no-sync` installs locally only;
 `python tools/rvc_models.py sync [name ...]` retries or reconciles voices
 (e.g. after moving models). A failed sync leaves the voice local-only —
 remote RVC returns 400 for it until synced.
