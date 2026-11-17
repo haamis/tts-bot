@@ -157,3 +157,13 @@ voices:
           f0_method: pm,
           speaker_id: 0}
     # Added by tools/rvc_models.py — https://voice-models.com/model/1qqDjYCJ1mS
+  meryl:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: "/home/haama/TTS-bot/rvc_models/meryl/MerylS.pth",
+          index: "/home/haama/TTS-bot/rvc_models/meryl/added_IVF123_Flat_nprobe_1_MerylS_v2.index",
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/1q6fGCwvpXY
