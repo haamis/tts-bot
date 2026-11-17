@@ -91,7 +91,7 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 | `ttsbot/llm/openrouter.py` | OpenRouter chat for `!generate` (reasoning off via `effort:none`; retries: over-cap, 429, empty, reasoning-mandatory 400, upstream 404/5xx — upstream retries exclude the failed provider via `provider.ignore`, parsed from the error body's `provider_name`) |
 | `ttsbot/audio/player.py` | playback; `_extract_url` lives in `bot.py` |
 | `config/voices.yaml` | user-tuned live — never assume its values in tests |
-| `ttsbot/voice_commands.py` | Manage Server-only `!addvoice` search/select/install and confirmed `!removevoice`; reuses `tools/rvc_models.py`, reloads voices live |
+| `ttsbot/voice_commands.py` | Manage Server-only `!addvoice` search/select/name-modal/install and confirmed `!removevoice`; reuses `tools/rvc_models.py`, reloads voices live |
 
 ## Hard-won gotchas — do not relearn these
 

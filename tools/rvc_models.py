@@ -147,7 +147,13 @@ def resolve_zip_url(arg: str, pick: int | None) -> tuple[str, str]:
 # --- downloading / unpacking -------------------------------------------------
 
 
+def direct_download_url(url: str) -> str:
+    """Pasted HuggingFace *file pages* (/blob/, /raw/) -> the direct /resolve/ URL."""
+    return re.sub(r"^(https?://huggingface\.co/.+?)/(?:blob|raw)/", r"\1/resolve/", url)
+
+
 def download_zip(url: str, dest: Path) -> Path:
+    url = direct_download_url(url)
     if "drive.google.com" in url:
         file_id = re.search(r"/file/d/([^/]+)|[?&]id=([^&]+)", url)
         if not file_id or "folders" in url:
@@ -377,9 +383,13 @@ def add_voice_to_config(
     insert_voice_block(config_path, name, block)
 
 
-def add_selected_model(row: ModelRow, config_path: Path) -> tuple[str, bool]:
-    """Install a Discord search selection without overwriting existing voices."""
-    name = slugify(row.title)[:40]
+def add_selected_model(row: ModelRow, config_path: Path, name: str | None = None) -> tuple[str, bool]:
+    """Install a Discord search selection without overwriting existing voices.
+
+    `name` is the user-chosen voice name; it is slugified so it always lands in
+    a directory and config key the rest of the tooling accepts.
+    """
+    name = slugify(name or row.title)[:40]
     if not VOICE_KEY_RE.fullmatch(name):
         name = f"voice_{name}"
     cfg = Config.load(config_path)

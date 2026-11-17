@@ -160,9 +160,11 @@ the bot. Google Drive folder links aren't auto-downloadable — grab the zip
 manually and use `add-zip`.
 
 In Discord, members with **Manage Server** permission can use
-`!addvoice vegeta` and choose a search result from the dropdown. The bot
-installs the selection using a title-derived voice name, updates the config,
-and syncs to both configured GPU machines (ifrit and the preferred 4080).
+`!addvoice vegeta` and choose a search result from the dropdown. A text field
+then asks for the voice name (`%name`); it defaults to the model title and is
+slugified (`My Goku!` → `my_goku`). The bot installs the selection under that
+name, updates the config, and syncs to both configured GPU machines (ifrit and
+the preferred 4080).
 The voice is available immediately without restarting. Existing names are
 never overwritten. The menu shows up to 25 first-page results and expires
 after three minutes; only the requester can use it.

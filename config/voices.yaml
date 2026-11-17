@@ -137,3 +137,23 @@ voices:
           f0_method: pm,
           speaker_id: 0}
     # Added by tools/rvc_models.py — https://voice-models.com/model/ 'Marge Simpson (The Simpsons: Hit & Run) (RVMPE 40k) (200 epochs)'
+  goku:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: "/home/haama/TTS-bot/rvc_models/dragon_ball_super_goku_english_250_epoch/Goku.pth",
+          index: "/home/haama/TTS-bot/rvc_models/dragon_ball_super_goku_english_250_epoch/added_IVF610_Flat_nprobe_1_Goku_v2.index",
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/1mXuR8BmoNv
+  vegeta:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: "/home/haama/TTS-bot/rvc_models/vegeta/Vegeta-FighterZ.pth",
+          index: "/home/haama/TTS-bot/rvc_models/vegeta/added_IVF1633_Flat_nprobe_1_Vegeta-FighterZ_v2.index",
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/1qqDjYCJ1mS

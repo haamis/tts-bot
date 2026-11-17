@@ -15,6 +15,22 @@ def can_manage_voices(guild, user) -> bool:
     return guild is not None and user.guild_permissions.manage_guild
 
 
+class VoiceNameModal(discord.ui.Modal, title="Name the new voice"):
+    name = discord.ui.TextInput(
+        label="Voice name", max_length=40,
+        placeholder="blank = name from the model title",
+    )
+
+    def __init__(self, view: "VoiceModelView", row):
+        super().__init__()
+        self.view_ref = view
+        self.row = row
+        self.name.default = rvc_models.slugify(row.title)[:40]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.view_ref.install(interaction, self.row, self.name.value)
+
+
 class VoiceModelView(discord.ui.View):
     def __init__(self, bot, requester_id: int, *, rows=None, name=None):
         super().__init__(timeout=180)
@@ -59,28 +75,22 @@ class VoiceModelView(discord.ui.View):
         if self.bot.voice_model_lock.locked():
             await interaction.response.send_message("Another voice change is running; try again shortly.", ephemeral=True)
             return
+        if self.rows is not None:
+            row = self.rows[int(self.children[0].values[0])]
+            await interaction.response.send_modal(VoiceNameModal(self, row))
+            return
         async with self.bot.voice_model_lock:
             self.stop()
             await interaction.response.edit_message(content="⏳ Updating voice models and both GPU machines…", view=None)
             try:
-                if self.rows is not None:
-                    row = self.rows[int(self.children[0].values[0])]
-                    name, synced = await asyncio.to_thread(rvc_models.add_selected_model, row, CONFIG_PATH)
-                    text = f"✅ Added **{name}**. Available immediately."
-                    if not synced:
-                        text += (f" ⚠️ Not synced to every GPU machine. The bot re-syncs the "
-                                 f"powered-off desktop automatically once it is reachable; force it "
-                                 f"with `python tools/rvc_models.py sync {name}`. Remote conversion "
-                                 f"may fail until synced.")
-                else:
-                    warnings = await asyncio.to_thread(rvc_models.remove_voice, self.name, CONFIG_PATH)
-                    text = f"✅ Removed **{self.name}**."
-                    if warnings:
-                        text += " ⚠️ " + " ".join(warnings)
+                warnings = await asyncio.to_thread(rvc_models.remove_voice, self.name, CONFIG_PATH)
+                text = f"✅ Removed **{self.name}**."
+                if warnings:
+                    text += " ⚠️ " + " ".join(warnings)
             except (Exception, SystemExit) as e:
-                log.exception("Voice model change failed")
+                log.exception("Voice removal failed")
                 # CLI validation errors use SystemExit; never let them escape a Discord task.
-                text = f"❌ Voice change failed: {str(e)[:500]}"
+                text = f"❌ Voice removal failed: {str(e)[:500]}"
             finally:
                 # A sync failure can happen after the local config has already changed.
                 try:
@@ -89,8 +99,42 @@ class VoiceModelView(discord.ui.View):
                     log.exception("Could not reload voice config")
                     text += " ⚠️ Config reload failed; check the config before restarting the bot."
             # Syncs can outlive the interaction token's 15-minute lifetime.
-            edit = self.message.edit if self.message is not None else interaction.edit_original_response
-            await edit(content=text[:2000], allowed_mentions=discord.AllowedMentions.none())
+            await self._finish(interaction, text)
+
+    async def install(self, interaction: discord.Interaction, row, name: str):
+        if self.is_finished():
+            await interaction.response.send_message("This selection is no longer active.", ephemeral=True)
+            return
+        if self.bot.voice_model_lock.locked():
+            await interaction.response.send_message("Another voice change is running; try again shortly.", ephemeral=True)
+            return
+        self.stop()
+        await interaction.response.defer()  # ack the modal; the status message carries the result
+        async with self.bot.voice_model_lock:
+            try:
+                name, synced = await asyncio.to_thread(rvc_models.add_selected_model, row, CONFIG_PATH, name)
+                text = f"✅ Added **{name}**. Available immediately."
+                if not synced:
+                    text += (f" ⚠️ Not synced to every GPU machine. The bot re-syncs the "
+                             f"powered-off desktop automatically once it is reachable; force it "
+                             f"with `python tools/rvc_models.py sync {name}`. Remote conversion "
+                             f"may fail until synced.")
+            except (Exception, SystemExit) as e:
+                log.exception("Voice model add failed")
+                text = f"❌ Adding the RVC model failed: {str(e)[:500]}"
+            finally:
+                # A sync failure can happen after the local config has already changed.
+                try:
+                    self.bot.config.voices = Config.load(CONFIG_PATH).voices
+                except Exception:
+                    log.exception("Could not reload voice config")
+                    text += " ⚠️ Config reload failed; check the config before restarting the bot."
+            # Syncs can outlive the interaction token's 15-minute lifetime.
+            await self._finish(interaction, text)
+
+    async def _finish(self, interaction: discord.Interaction, text: str):
+        edit = self.message.edit if self.message is not None else interaction.edit_original_response
+        await edit(content=text[:2000], view=None, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def handle_voice_command(bot, message: discord.Message, command: str):
@@ -128,7 +172,7 @@ async def handle_voice_command(bot, message: discord.Message, command: str):
     view = VoiceModelView(bot, message.author.id, rows=rows[:25])
     view.message = status
     await status.edit(
-        content="Choose a model below to download, install and sync. "
+        content="Choose a model below to download, install and sync, then name the voice. "
                 "Showing up to 25 results from the first page; refine your search for other matches.",
         view=view,
     )

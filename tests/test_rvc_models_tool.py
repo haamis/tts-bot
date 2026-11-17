@@ -355,6 +355,19 @@ def test_selected_model_installs_and_syncs(monkeypatch, model_store, tmp_path):
     assert yaml.safe_load(cfg.read_text())["voices"][name]["rvc"]["model"] == str(root / name / "Vegeta.pth")
 
 
+def test_selected_model_uses_the_requested_name(monkeypatch, model_store, tmp_path):
+    root, cfg = model_store
+    cfg.write_text(BASE_CONFIG)
+    archive = make_zip(tmp_path / "m.zip", {"nested/Vegeta.pth": 100})
+    monkeypatch.setattr(rvc_models, "download_zip", lambda url, dest: archive)
+    monkeypatch.setattr(rvc_models, "sync_voice_to_gpu", lambda n, d: True)
+    name, _ = rvc_models.add_selected_model(
+        rvc_models.ModelRow("123", "Vegeta", "", "https://x"), cfg, "My Goku!")
+    assert name == "my_goku"
+    assert (root / "my_goku" / "Vegeta.pth").exists()
+    assert "my_goku" in yaml.safe_load(cfg.read_text())["voices"]
+
+
 def test_selected_model_resolves_missing_download_link(monkeypatch, model_store, tmp_path):
     root, cfg = model_store
     cfg.write_text(BASE_CONFIG)
@@ -606,6 +619,26 @@ def test_remove_preserves_shared_file_symlink_to_external_asset(model_store, tmp
     cfg.write_text(cfg.read_text() + f"  other:\n    tts: donor\n    rvc_model: {link}\n")
     assert "shared" in rvc_models.remove_voice("vegeta", cfg)[0]
     assert link.exists()
+
+
+@pytest.mark.parametrize("page_url", [
+    "https://huggingface.co/AEsir-theman/RVC-Models/blob/main/MerylS.zip",
+    "https://huggingface.co/AEsir-theman/RVC-Models/raw/main/MerylS%20v2.zip",
+])
+def test_huggingface_file_page_becomes_a_direct_download(monkeypatch, tmp_path, page_url):
+    seen = []
+    monkeypatch.setattr(rvc_models, "_stream_to_file",
+                        lambda url, dest, session=None: seen.append(url) or dest)
+    rvc_models.download_zip(page_url, tmp_path / "model.zip")
+    name = page_url.split("/", 7)[-1]
+    assert seen == [f"https://huggingface.co/AEsir-theman/RVC-Models/resolve/main/{name}"]
+
+
+def test_direct_download_url_leaves_working_urls_alone():
+    for url in ("https://huggingface.co/u/repo/resolve/main/v.zip",
+                "https://cdn.discordapp.com/attachments/1/2/v.zip",
+                "https://drive.google.com/uc?export=download&id=1"):
+        assert rvc_models.direct_download_url(url) == url
 
 
 @pytest.mark.parametrize("declared_size", [None, "9"])

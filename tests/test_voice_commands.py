@@ -28,7 +28,8 @@ def message(content, *, manage=True, guild=True):
 
 def interaction(user=None):
     return SimpleNamespace(user=user or member(), guild=object(),
-                           response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock()),
+                           response=SimpleNamespace(send_message=AsyncMock(), edit_message=AsyncMock(),
+                                                    send_modal=AsyncMock(), defer=AsyncMock()),
                            edit_original_response=AsyncMock())
 
 
@@ -89,24 +90,33 @@ async def test_only_requester_with_current_permission_can_select():
 
 
 @pytest.mark.parametrize("synced", [False, True])
-async def test_select_installs_once_and_reloads_voices(monkeypatch, synced):
+async def test_select_asks_for_a_name_then_installs_once(monkeypatch, synced):
     b = bot()
     row = vc.rvc_models.ModelRow("1", "Vegeta", "", "")
     calls = []
     monkeypatch.setattr(vc.rvc_models, "add_selected_model",
-                        lambda r, p: calls.append(r) or ("vegeta", synced))
-    monkeypatch.setattr(vc.Config, "load", lambda p: SimpleNamespace(voices={"vegeta": object()}))
+                        lambda r, p, n: calls.append((r, n)) or ("my_vegeta", synced))
+    monkeypatch.setattr(vc.Config, "load", lambda p: SimpleNamespace(voices={"my_vegeta": object()}))
     view = vc.VoiceModelView(b, 1, rows=[row])
     view.children[0]._values = ["0"]
     click = interaction()
     await view.run(click)
-    assert calls == [row]
-    assert list(b.config.voices) == ["vegeta"]
+    assert calls == []  # the model is not installed before the name is submitted
+    modal = click.response.send_modal.call_args.args[0]
+    assert modal.name.default == "vegeta"
+    modal.name._value = "My Vegeta!"
+    submit = interaction()
+    await modal.on_submit(submit)
+    assert calls == [(row, "My Vegeta!")]
+    assert submit.response.defer.awaited
+    assert list(b.config.voices) == ["my_vegeta"]
     assert b.config.max_chars == 123
-    text = click.edit_original_response.call_args.kwargs["content"]
+    text = submit.edit_original_response.call_args.kwargs["content"]
+    assert "my_vegeta" in text
     assert ("Not synced" in text) is (not synced)
-    await view.run(interaction())
-    assert calls == [row]
+    # A second submit (stale modal) must not install again.
+    await modal.on_submit(interaction())
+    assert calls == [(row, "My Vegeta!")]
     assert not b.voice_model_lock.locked()
 
 
@@ -119,6 +129,7 @@ async def test_cli_systemexit_is_reported_without_killing_callback(monkeypatch):
     click = interaction()
     await view.run(click)
     assert "No usable model" in click.edit_original_response.call_args.kwargs["content"]
+    assert "removal failed" in click.edit_original_response.call_args.kwargs["content"]
     assert not view.bot.voice_model_lock.locked()
 
 
