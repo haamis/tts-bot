@@ -163,6 +163,14 @@ async def test_pitch_profiling_failure_does_not_fail_the_add(monkeypatch):
     assert "analyze_voices.py --voice my_vegeta" in text
 
 
+async def test_pitch_profiling_skips_a_voice_missing_from_the_loaded_config(monkeypatch):
+    b = bot()
+    b.pipeline = SimpleNamespace(rvc=object())
+    monkeypatch.setattr(vc.analyze_voices, "profile_voice_now", AsyncMock())
+    text = await vc.profile_pitch(b, "gone")
+    assert "missing from the loaded config" in text
+
+
 async def test_pitch_profiling_reports_the_measured_pitch(monkeypatch):
     b = bot()
     b.config.voices = {"my_vegeta": SimpleNamespace(rvc_model="/model.pth")}

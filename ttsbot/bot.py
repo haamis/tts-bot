@@ -13,7 +13,7 @@ from ttsbot.config import Config, load_env
 from ttsbot.parser import Turn, parse_dialogue, ParseError
 from ttsbot.pipeline import Pipeline, RequestCancelled, fallback_chain
 from ttsbot.tts.manager import build_tts_manager
-from ttsbot.rvc.runner import RvcRunner, RVCRequestError
+from ttsbot.rvc.runner import build_rvc_runner, RVCRequestError
 from ttsbot.media.ytdlp_runner import YtdlpRunner, YtdlpAuthError
 from ttsbot.media import diarize
 from ttsbot.llm.openrouter import (
@@ -61,23 +61,9 @@ class TTSBot(commands.Bot):
         self.config = config
         self.env = env
         self.voice_model_lock = asyncio.Lock()
-        rvc_root = Path(config.rvc_root)
-        if not rvc_root.is_absolute():
-            rvc_root = PROJECT_ROOT / rvc_root
         self.pipeline = Pipeline(
             tts=build_tts_manager(env, ffmpeg_path=config.ffmpeg_path),
-            rvc=RvcRunner(
-                infer_script="infer/cli.py",
-                rvc_root=str(rvc_root),
-                use_worker=env["RVC_WORKER"],
-                server_url=env["RVC_GPU_SERVER_URL"],
-                preferred_server_url=env.get("RVC_GPU_PREFERRED_URL", ""),
-                preferred_server_token=env.get("RVC_GPU_PREFERRED_TOKEN", ""),
-                server_token=env["RVC_GPU_SERVER_TOKEN"],
-                server_timeout=env["RVC_GPU_SERVER_TIMEOUT"],
-                wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
-                wol_broadcast=env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
-            ),
+            rvc=build_rvc_runner(config, env),
             rvc_engine=env.get("RVC_ENGINE", "rvc"),
             rvc_fallback=env.get("RVC_FALLBACK", "auto"),
         )
@@ -1350,22 +1336,11 @@ async def main():
         from ttsbot.parser import parse_dialogue
         from ttsbot.pipeline import Pipeline
         from ttsbot.tts.manager import build_tts_manager
-        from ttsbot.rvc.runner import RvcRunner, RVCRequestError
+        from ttsbot.rvc.runner import build_rvc_runner, RVCRequestError
 
         pipeline = Pipeline(
             tts=build_tts_manager(env, ffmpeg_path=config.ffmpeg_path),
-            rvc=RvcRunner(
-                infer_script="infer/cli.py",
-                rvc_root=str(PROJECT_ROOT / config.rvc_root),
-                use_worker=env["RVC_WORKER"],
-                server_url=env.get("RVC_GPU_SERVER_URL", ""),
-                preferred_server_url=env.get("RVC_GPU_PREFERRED_URL", ""),
-                preferred_server_token=env.get("RVC_GPU_PREFERRED_TOKEN", ""),
-                server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
-                server_timeout=env.get("RVC_GPU_SERVER_TIMEOUT", 900),
-                wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
-                wol_broadcast=env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
-            ),
+            rvc=build_rvc_runner(config, env),
             rvc_engine=env.get("RVC_ENGINE", "rvc"),
             rvc_fallback=env.get("RVC_FALLBACK", "auto"),
         )

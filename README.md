@@ -66,7 +66,9 @@ sudo apt update && sudo apt install -y ffmpeg libsodium-dev
    hf download lj1995/VoiceConversionWebUI rmvpe.pt --revision main \
      --local-dir rvc_infer/assets/rmvpe
    ```
-   Piper TTS voice models are downloaded automatically on first use into `piper_voices/`.
+   Piper TTS voice models are downloaded automatically on first use into
+   `piper_voices/`, which Compose bind-mounts into the bot container so they
+   survive rebuilds.
 
 6. **YouTube support for `!rvc`**
 

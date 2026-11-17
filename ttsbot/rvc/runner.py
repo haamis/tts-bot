@@ -702,3 +702,22 @@ class RvcRunner:
                 pass
         finally:
             self._worker = None
+
+
+def build_rvc_runner(config, env) -> RvcRunner:
+    """RvcRunner from voices.yaml + .env (the bot, its dry run, and CLI tools)."""
+    rvc_root = Path(config.rvc_root)
+    if not rvc_root.is_absolute():
+        rvc_root = Path(__file__).resolve().parents[2] / rvc_root
+    return RvcRunner(
+        infer_script="infer/cli.py",
+        rvc_root=str(rvc_root),
+        use_worker=env.get("RVC_WORKER", True),
+        server_url=env.get("RVC_GPU_SERVER_URL", ""),
+        preferred_server_url=env.get("RVC_GPU_PREFERRED_URL", ""),
+        preferred_server_token=env.get("RVC_GPU_PREFERRED_TOKEN", ""),
+        server_token=env.get("RVC_GPU_SERVER_TOKEN", ""),
+        server_timeout=env.get("RVC_GPU_SERVER_TIMEOUT", 900),
+        wol_mac=env.get("RVC_GPU_SERVER_WOL_MAC", ""),
+        wol_broadcast=env.get("RVC_GPU_SERVER_WOL_BROADCAST", "255.255.255.255"),
+    )

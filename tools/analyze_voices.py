@@ -38,7 +38,7 @@ from ttsbot.media.diarize import (  # noqa: E402
     profile_key,
     save_profiles,
 )
-from ttsbot.rvc.runner import RvcRunner  # noqa: E402
+from ttsbot.rvc.runner import RvcRunner, build_rvc_runner  # noqa: E402
 from ttsbot.tts.piper_runner import PiperRunner, ensure_piper_voice  # noqa: E402
 
 SAMPLE_TEXT = (
@@ -103,14 +103,7 @@ async def main() -> int:
     env = load_env()
     profiles = load_profiles(PROFILES_PATH)
 
-    rvc_root = Path(config.rvc_root)
-    if not rvc_root.is_absolute():
-        rvc_root = PROJECT_ROOT / rvc_root
-    rvc = RvcRunner(
-        infer_script="infer/cli.py",
-        rvc_root=str(rvc_root),
-        use_worker=env["RVC_WORKER"],
-    )
+    rvc = build_rvc_runner(config, env)
     piper = PiperRunner()
 
     voices = list(config.voices.values())

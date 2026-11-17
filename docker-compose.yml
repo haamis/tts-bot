@@ -18,6 +18,9 @@ services:
       - "ifrit.local:192.168.1.162"
     volumes:
       - ./config:/app/config
+      # Piper voices persist on the host: a fresh container would otherwise
+      # re-download ~63 MB per voice (also used by !addvoice's pitch profiling).
+      - ./piper_voices:/app/piper_voices
       - ${RVC_MODELS_HOST_PATH:-./rvc_models}:/home/haama/TTS-bot/rvc_models
       - ${RVC_SYNC_SSH_DIR:-${HOME}/.config/ttsbot/model-sync-ssh}:/run/rvc-model-sync:ro
       - tts_temp:/app/temp

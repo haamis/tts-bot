@@ -1,5 +1,7 @@
 """The optional always-on desktop precedes ifrit, without inheriting its WoL."""
 
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -7,10 +9,12 @@ import pytest
 import ttsbot.network as network
 
 from ttsbot.media.diarize_remote import diarize_remote, DiarizeRequestError
-from ttsbot.rvc.runner import RvcRunner, RVCRequestError, WorkerCrashed
+from ttsbot.rvc.runner import RvcRunner, RVCRequestError, WorkerCrashed, build_rvc_runner
 from ttsbot.tts.kokoro_remote import (
     KokoroRemoteRunner, KokoroRemoteRequestError, KokoroRemoteTransient,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -267,3 +271,28 @@ async def test_preferred_model_reconcile_is_single_flight_and_rate_limited(monke
     await rvc_runner._reconcile_preferred_models()
     assert calls == [1]  # still inside the short retry window
 
+
+
+def test_build_rvc_runner_wires_config_and_env(tmp_path):
+    config = SimpleNamespace(rvc_root=str(tmp_path / "rvc_infer"))
+    env = {
+        "RVC_WORKER": False,
+        "RVC_GPU_SERVER_URL": "http://ifrit:8001/",
+        "RVC_GPU_SERVER_TOKEN": "ifrit-key",
+        "RVC_GPU_SERVER_TIMEOUT": 42,
+        "RVC_GPU_SERVER_WOL_MAC": "aa:bb:cc:dd:ee:ff",
+        "RVC_GPU_PREFERRED_URL": "http://4080:8001",
+        "RVC_GPU_PREFERRED_TOKEN": "4080-key",
+    }
+    runner = build_rvc_runner(config, env)
+    assert runner.rvc_root == (tmp_path / "rvc_infer").resolve()
+    assert runner.server_url == "http://ifrit:8001"
+    assert runner.server_token == "ifrit-key"
+    assert runner.preferred.server_url == "http://4080:8001"
+    assert runner.preferred.server_token == "4080-key"
+
+
+def test_build_rvc_runner_anchors_a_relative_rvc_root():
+    runner = build_rvc_runner(SimpleNamespace(rvc_root="rvc_infer"), {})
+    assert runner.rvc_root == (REPO_ROOT / "rvc_infer").resolve()
+    assert runner.server_url == "" and runner.preferred is None
