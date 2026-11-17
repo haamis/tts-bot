@@ -58,7 +58,11 @@ GPU server `rvc-server` runs on **ifrit**, `192.168.1.162`, from
 `~/rvc-gpu-server`. Check the configured remote URL or SSH to ifrit; inspecting
 localhost's CUDA says nothing about the GPU server. Never install NVIDIA drivers
 or start a GPU server on boksi. Rebuild/recreate Docker to deploy code; `restart`
-does not pick up a new image or changed `.env`. Venv is for local tests only.
+does not pick up a new image or changed `.env`. **Deploying is the user's call:**
+never rebuild or recreate the `tts-bot` container unless they explicitly ask —
+commit and push, then stop. A recreate also throws away the container's
+writable layer (see the wav2vec2 cache note under diarization). Venv is for
+local tests only.
 
 ## Commands
 
@@ -215,7 +219,9 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 - Multi-voice `!rvc` diarization: `RVC_DIARIZE_THRESHOLD` (default 0.35,
   calibrated on real clips; 0 = force K clusters, no collapse). wav2vec2
   weights (~360MB) download once to `~/.cache/torch` and load lazily per
-  command. pyannote (auto + `HF_TOKEN`) merges close voices on music-bedded
+  command — inside the bot container that is `/root/.cache/torch`, part of the
+  writable layer, so a recreated container downloads them again (a volume would
+  keep them). pyannote (auto + `HF_TOKEN`) merges close voices on music-bedded
   or edited audio — a four-character YouTube Poop clip came back as one
   speaker — so when it finds fewer speakers than requested voices the bot
   retries once with the f0-aware local engine (remote first) and keeps that
