@@ -86,7 +86,7 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to the GPU b
 | `rvc-gpu-server/` (submodule) | desktop FastAPI server: `/health`, `/convert`, `/diarize`, `/separate`, `/tts`, `/chatterbox`, `/vc`, `/whisperx`; Docker via `compose.yaml` (CPU) / `compose.gpu.yaml`; assets bind-mounted; protocol `X-RVC-Protocol: 1` |
 | `ttsbot/rvc/worker.py` | persistent RVC worker (JSON lines on stdin/stdout) |
 | `ttsbot/media/ytdlp_runner.py` | yt-dlp probe/download + duration cap |
-| `ttsbot/media/diarize.py` | Multi-voice `!rvc` diarization: wav2vec2 embeddings -> clustering -> pitch-ranked voice assignment; `tools/analyze_voices.py` builds `config/voice_pitch.json` |
+| `ttsbot/media/diarize.py` | Multi-voice `!rvc` diarization: wav2vec2 embeddings -> clustering -> pitch-ranked voice assignment; `tools/analyze_voices.py` builds `config/voice_pitch.json` (`!addvoice` runs it for the new voice) |
 | `ttsbot/media/diarize_pyannote.py` | Optional pyannote engine (`RVC_DIARIZE_ENGINE`, gated models need `HF_TOKEN`); same Segment/assignment tail as local |
 | `ttsbot/llm/openrouter.py` | OpenRouter chat for `!generate` (reasoning off via `effort:none`; retries: over-cap, 429, empty, reasoning-mandatory 400, upstream 404/5xx — upstream retries exclude the failed provider via `provider.ignore`, parsed from the error body's `provider_name`) |
 | `ttsbot/audio/player.py` | playback; `_extract_url` lives in `bot.py` |

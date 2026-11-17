@@ -20,6 +20,7 @@ Usage:
 import argparse
 import asyncio
 import logging
+import shutil
 import sys
 import tempfile
 import uuid
@@ -31,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from ttsbot.config import Config, load_env  # noqa: E402
 from ttsbot.media.audio import load_mono  # noqa: E402
 from ttsbot.media.diarize import (  # noqa: E402
+    load_profiles,
     measure_f0,
     profile_f0,
     profile_key,
@@ -43,6 +45,7 @@ SAMPLE_TEXT = (
     "Hello! This is a sample sentence used to measure the pitch of this "
     "voice. The quick brown fox jumps over the lazy dog."
 )
+PROFILES_PATH = PROJECT_ROOT / "config" / "voice_pitch.json"
 
 log = logging.getLogger("ttsbot.tools.analyze_voices")
 
@@ -69,6 +72,26 @@ async def profile_voice(
     return measure_f0(audio, sr)
 
 
+async def profile_voice_now(cfg, piper: PiperRunner, rvc: RvcRunner) -> float | None:
+    """Profile one voice and cache it in config/voice_pitch.json.
+
+    Returns the median f0, or None when nothing voiced was measured. Raises on
+    a missing model file or a failed synthesis/conversion.
+    """
+    model_mtime = Path(cfg.rvc_model).stat().st_mtime
+    workdir = Path(tempfile.gettempdir()) / "ttsbot" / f"profile_{uuid.uuid4().hex[:8]}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    try:
+        f0 = await profile_voice(cfg.name, cfg, piper, rvc, workdir)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    if f0 is not None:
+        profiles = load_profiles(PROFILES_PATH)
+        profiles[cfg.name] = {"f0": round(f0, 1), "key": profile_key(cfg, model_mtime)}
+        save_profiles(PROFILES_PATH, profiles)
+    return f0
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--voice", action="append", help="only this voice (repeatable)")
@@ -78,11 +101,7 @@ async def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     config = Config.load(PROJECT_ROOT / "config" / "voices.yaml")
     env = load_env()
-    profiles_path = PROJECT_ROOT / "config" / "voice_pitch.json"
-
-    from ttsbot.media.diarize import load_profiles
-
-    profiles = load_profiles(profiles_path)
+    profiles = load_profiles(PROFILES_PATH)
 
     rvc_root = Path(config.rvc_root)
     if not rvc_root.is_absolute():
@@ -104,16 +123,8 @@ async def main() -> int:
             return 1
         voices = [v for v in voices if v.name in wanted]
 
-    workdir = Path(tempfile.gettempdir()) / "ttsbot" / f"profile_{uuid.uuid4().hex[:8]}"
-    workdir.mkdir(parents=True, exist_ok=True)
     try:
         for cfg in voices:
-            try:
-                model_mtime = Path(cfg.rvc_model).stat().st_mtime
-            except OSError as e:
-                log.error("%s: RVC model not found (%s) — skipping", cfg.name, e)
-                continue
-
             if not args.force and profile_f0(profiles, cfg.name, cfg) is not None:
                 cached = profiles.get(cfg.name, {}).get("f0")
                 log.info("%s: profile current (f0=%.1fHz) — skipping", cfg.name, cached)
@@ -121,22 +132,20 @@ async def main() -> int:
 
             log.info("%s: profiling (Piper sample -> RVC -> f0 estimator)...", cfg.name)
             try:
-                f0 = await profile_voice(cfg.name, cfg, piper, rvc, workdir)
+                f0 = await profile_voice_now(cfg, piper, rvc)
+            except OSError as e:
+                log.error("%s: RVC model not found (%s) — skipping", cfg.name, e)
+                continue
             except Exception as e:
                 log.error("%s: profiling failed: %s", cfg.name, e)
                 continue
             if f0 is None:
                 log.error("%s: no voiced audio measured — skipping", cfg.name)
                 continue
-            profiles[cfg.name] = {"f0": round(f0, 1), "key": profile_key(cfg, model_mtime)}
-            save_profiles(profiles_path, profiles)
-            log.info("%s: f0 = %.1fHz -> %s", cfg.name, f0, profiles_path)
+            log.info("%s: f0 = %.1fHz -> %s", cfg.name, f0, PROFILES_PATH)
         return 0
     finally:
         await rvc.shutdown()
-        import shutil
-
-        shutil.rmtree(workdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

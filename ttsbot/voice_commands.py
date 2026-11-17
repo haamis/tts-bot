@@ -4,8 +4,9 @@ import logging
 
 import discord
 
-from tools import rvc_models
+from tools import analyze_voices, rvc_models
 from ttsbot.config import Config
+from ttsbot.tts.piper_runner import PiperRunner
 
 log = logging.getLogger("ttsbot")
 CONFIG_PATH = rvc_models.PROJECT_ROOT / "config" / "voices.yaml"
@@ -13,6 +14,27 @@ CONFIG_PATH = rvc_models.PROJECT_ROOT / "config" / "voices.yaml"
 
 def can_manage_voices(guild, user) -> bool:
     return guild is not None and user.guild_permissions.manage_guild
+
+
+async def profile_pitch(bot, name: str) -> str:
+    """Pitch-profile a freshly added voice for multi-voice `!rvc`.
+
+    Never raises: the voice is already installed, and an unprofiled voice still
+    works (diarization falls back to first-appearance order).
+    """
+    cfg = bot.config.voices.get(name)
+    if cfg is None:
+        return " ⚠️ Voice is installed but missing from the loaded config; pitch profile skipped."
+    try:
+        f0 = await analyze_voices.profile_voice_now(cfg, PiperRunner(), bot.pipeline.rvc)
+    except Exception as e:
+        log.exception("Pitch profiling failed")
+        return (f" ⚠️ No pitch profile ({str(e)[:200]}) — multi-voice `!rvc` falls back to "
+                f"first-appearance order; retry with `python tools/analyze_voices.py --voice {name}`.")
+    if f0 is None:
+        return (f" ⚠️ Pitch profiling measured no voiced audio; retry with "
+                f"`python tools/analyze_voices.py --voice {name}`.")
+    return f" 🎚 Pitch profile: {f0:.0f} Hz."
 
 
 class VoiceNameModal(discord.ui.Modal, title="Name the new voice"):
@@ -111,13 +133,14 @@ class VoiceModelView(discord.ui.View):
         self.stop()
         await interaction.response.defer()  # ack the modal; the status message carries the result
         async with self.bot.voice_model_lock:
+            added = None
             try:
-                name, synced = await asyncio.to_thread(rvc_models.add_selected_model, row, CONFIG_PATH, name)
-                text = f"✅ Added **{name}**. Available immediately."
+                added, synced = await asyncio.to_thread(rvc_models.add_selected_model, row, CONFIG_PATH, name)
+                text = f"✅ Added **{added}**. Available immediately."
                 if not synced:
                     text += (f" ⚠️ Not synced to every GPU machine. The bot re-syncs the "
                              f"powered-off desktop automatically once it is reachable; force it "
-                             f"with `python tools/rvc_models.py sync {name}`. Remote conversion "
+                             f"with `python tools/rvc_models.py sync {added}`. Remote conversion "
                              f"may fail until synced.")
             except (Exception, SystemExit) as e:
                 log.exception("Voice model add failed")
@@ -129,6 +152,8 @@ class VoiceModelView(discord.ui.View):
                 except Exception:
                     log.exception("Could not reload voice config")
                     text += " ⚠️ Config reload failed; check the config before restarting the bot."
+            if added is not None:
+                text += await profile_pitch(self.bot, added)
             # Syncs can outlive the interaction token's 15-minute lifetime.
             await self._finish(interaction, text)
 

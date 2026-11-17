@@ -214,7 +214,10 @@ BOT_DRY_RUN=1
 - `!speak %voice text %voice2 more text` — Generate and play dialogue
 - `!rvc <voice[,voice2,...]> <url or search terms>` — Download a video/audio URL with yt-dlp, convert it with the given RVC voice, and play it (e.g. `!rvc snake https://youtube.com/watch?v=...` or `!rvc %snake ...`). If the argument contains no URL, it is used as a YouTube search instead (`!rvc trump rick never gonna give you up`). The status message shows the media length; media longer than the limit (default 3 minutes, `MAX_MEDIA_SECONDS` in `.env`) is rejected — searched videos included.
   - **Multiple voices** (`!rvc trump,snake <url>`): the media is diarized — speech is split into speaker segments via wav2vec2 embeddings + clustering — and each speaker is converted with its assigned voice. Speakers are matched to voices by pitch (higher-pitch voice ↔ higher-pitch speaker, using per-voice pitch profiles from `tools/analyze_voices.py`; unprofiled voices fall back to first-appearance order). Music/silence between segments stays original audio. The done status reports the assignment (e.g. `trump @ 156Hz, snake @ 471Hz`).
-  - Run `python tools/analyze_voices.py` once (and after adding/changing voices) to build the pitch profiles; the done status warns about unprofiled voices.
+  - Profiles are built by `python tools/analyze_voices.py`; `!addvoice` runs it for the
+    new voice automatically (the reply reports the measured pitch). Profiles are keyed by
+    model path + mtime + `pitch` + `f0_method`, so re-run the tool after retuning a voice —
+    stale entries are ignored. The done status warns about unprofiled voices.
 - `!generate <voice[,voice2,...]> <prompt>` — An LLM (OpenRouter) writes spoken text from your prompt, then it's played through the normal pipeline. One voice gives a monologue (e.g. `!generate trump a rant about tiny keyboards`); comma-separated voices give a multi-voice dialogue where the LLM takes turns (e.g. `!generate trump,snake arguing which is better, burger king or mcdonalds`)
 - `!cancel` — Skip the request currently being processed or playing and move on to the next one in queue (queued requests keep their place). Replies `Nothing to skip` when nothing is running.
 - `!voices` — List available voices

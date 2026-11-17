@@ -97,6 +97,8 @@ async def test_select_asks_for_a_name_then_installs_once(monkeypatch, synced):
     monkeypatch.setattr(vc.rvc_models, "add_selected_model",
                         lambda r, p, n: calls.append((r, n)) or ("my_vegeta", synced))
     monkeypatch.setattr(vc.Config, "load", lambda p: SimpleNamespace(voices={"my_vegeta": object()}))
+    profile = AsyncMock(return_value=" 🎚 Pitch profile: 150 Hz.")
+    monkeypatch.setattr(vc, "profile_pitch", profile)
     view = vc.VoiceModelView(b, 1, rows=[row])
     view.children[0]._values = ["0"]
     click = interaction()
@@ -113,11 +115,67 @@ async def test_select_asks_for_a_name_then_installs_once(monkeypatch, synced):
     assert b.config.max_chars == 123
     text = submit.edit_original_response.call_args.kwargs["content"]
     assert "my_vegeta" in text
+    assert "Pitch profile: 150 Hz" in text
+    profile.assert_awaited_once_with(b, "my_vegeta")
     assert ("Not synced" in text) is (not synced)
     # A second submit (stale modal) must not install again.
     await modal.on_submit(interaction())
     assert calls == [(row, "My Vegeta!")]
+    assert profile.await_count == 1
     assert not b.voice_model_lock.locked()
+
+
+@pytest.mark.parametrize("error, expected", [
+    (RuntimeError("offline"), "Adding the RVC model failed: offline"),
+    (SystemExit("already exists"), "Adding the RVC model failed: already exists"),
+])
+async def test_failed_add_reports_its_own_error_and_skips_profiling(monkeypatch, error, expected):
+    b = bot()
+
+    def fail(*args):
+        raise error
+    monkeypatch.setattr(vc.rvc_models, "add_selected_model", fail)
+    monkeypatch.setattr(vc.Config, "load", lambda p: SimpleNamespace(voices={}))
+    profile = AsyncMock()
+    monkeypatch.setattr(vc, "profile_pitch", profile)
+    view = vc.VoiceModelView(b, 1, rows=[vc.rvc_models.ModelRow("1", "Vegeta", "", "")])
+    view.children[0]._values = ["0"]
+    modal = vc.VoiceNameModal(view, view.rows[0])
+    submit = interaction()
+    await modal.on_submit(submit)
+    text = submit.edit_original_response.call_args.kwargs["content"]
+    assert expected in text
+    assert b.config.max_chars == 123  # config still reloaded after the failure
+    profile.assert_not_awaited()
+    assert not b.voice_model_lock.locked()
+
+
+async def test_pitch_profiling_failure_does_not_fail_the_add(monkeypatch):
+    b = bot()
+    b.config.voices = {"my_vegeta": SimpleNamespace(rvc_model="/missing.pth")}
+    b.pipeline = SimpleNamespace(rvc=object())
+
+    async def boom(*args):
+        raise OSError("GPU server unavailable")
+    monkeypatch.setattr(vc.analyze_voices, "profile_voice_now", boom)
+    text = await vc.profile_pitch(b, "my_vegeta")
+    assert "No pitch profile (GPU server unavailable)" in text
+    assert "analyze_voices.py --voice my_vegeta" in text
+
+
+async def test_pitch_profiling_reports_the_measured_pitch(monkeypatch):
+    b = bot()
+    b.config.voices = {"my_vegeta": SimpleNamespace(rvc_model="/model.pth")}
+    b.pipeline = SimpleNamespace(rvc=object())
+    seen = []
+
+    async def fake_profile(cfg, piper, rvc):
+        seen.append((cfg, rvc))
+        return 156.4
+    monkeypatch.setattr(vc.analyze_voices, "profile_voice_now", fake_profile)
+    text = await vc.profile_pitch(b, "my_vegeta")
+    assert text == " 🎚 Pitch profile: 156 Hz."
+    assert seen == [(b.config.voices["my_vegeta"], b.pipeline.rvc)]
 
 
 async def test_cli_systemexit_is_reported_without_killing_callback(monkeypatch):
