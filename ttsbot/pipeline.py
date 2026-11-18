@@ -3,6 +3,7 @@ import os
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,38 @@ class RequestCancelled(Exception):
     """
 
 
+@dataclass(eq=False)
+class VoiceRequest:
+    """One request's own cancel flag.
+
+    A channel used to run one request at a time, so a single per-channel flag
+    was enough. Now a channel prepares one track while another plays, so the
+    flag belongs to the request: cancelling the playing track must not abort
+    the one being processed.
+    """
+
+    guild_id: int
+    channel_id: int
+    cancel: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class _ChannelQueue:
+    """Per voice channel: a depth-1 processing pipeline and a depth-1 play slot.
+
+    processing_lock - one track is prepared (download, convert, TTS) at a
+                      time; the rest wait here in FIFO order.
+    play_lock      - one track plays at a time.
+    """
+
+    def __init__(self):
+        self.processing_lock = asyncio.Lock()
+        self.play_lock = asyncio.Lock()
+        self.playing: VoiceRequest | None = None
+        self.processing: VoiceRequest | None = None
+        self.prepared: list[VoiceRequest] = []
+        self.waiting = 0
+
+
 class Pipeline:
     def __init__(
         self,
@@ -51,54 +84,126 @@ class Pipeline:
         self.rvc_fallback = rvc_fallback
         self.temp_dir = temp_dir or Path(tempfile.gettempdir()) / "ttsbot"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self._vc_locks: dict[tuple[int, int], asyncio.Lock] = {}
-        self._cancel_events: dict[tuple[int, int], asyncio.Event] = {}
+        self._queues: dict[tuple[int, int], _ChannelQueue] = {}
 
-    def _get_lock(self, guild_id: int, channel_id: int) -> asyncio.Lock:
+    def _queue(self, guild_id: int, channel_id: int) -> _ChannelQueue:
         key = (guild_id, channel_id)
-        if key not in self._vc_locks:
-            self._vc_locks[key] = asyncio.Lock()
-        return self._vc_locks[key]
+        if key not in self._queues:
+            self._queues[key] = _ChannelQueue()
+        return self._queues[key]
+
+    def new_request(self, guild_id: int, channel_id: int) -> VoiceRequest:
+        """A request handle with its own cancel flag."""
+        return VoiceRequest(guild_id=guild_id, channel_id=channel_id)
 
     @asynccontextmanager
-    async def channel_lock(self, guild_id: int, channel_id: int):
-        """Serialize generate+playback for one voice channel."""
-        async with self._get_lock(guild_id, channel_id):
-            yield
+    async def processing_slot(self, request: VoiceRequest):
+        """Depth-1 processing pipeline: one track is prepared at a time.
+
+        Requests arriving while the slot is busy wait here in FIFO order —
+        the queue is never rejected. Preparing (download, convert, TTS) runs
+        while another request is playing.
+        """
+        queue = self._queue(request.guild_id, request.channel_id)
+        queue.waiting += 1
+        admitted = False
+        try:
+            async with queue.processing_lock:
+                queue.waiting -= 1
+                admitted = True
+                queue.processing = request
+                try:
+                    yield
+                finally:
+                    queue.processing = None
+        finally:
+            if not admitted:
+                queue.waiting -= 1
+
+    @asynccontextmanager
+    async def play_slot(self, request: VoiceRequest):
+        """Depth-1 playback: one track plays at a time."""
+        queue = self._queue(request.guild_id, request.channel_id)
+        async with queue.play_lock:
+            queue.playing = request
+            if request in queue.prepared:
+                queue.prepared.remove(request)
+            try:
+                yield
+            finally:
+                queue.playing = None
+
+    def mark_prepared(self, request: VoiceRequest) -> None:
+        """Record a finished track as waiting for the play slot."""
+        self._queue(request.guild_id, request.channel_id).prepared.append(request)
+
+    def playing_request(self, guild_id: int, channel_id: int) -> VoiceRequest | None:
+        """The request currently playing in this channel, if any."""
+        queue = self._queues.get((guild_id, channel_id))
+        return queue.playing if queue else None
+
+    def tracks_ahead(self, guild_id: int, channel_id: int) -> int:
+        """How many tracks a new request on this channel has to wait behind.
+
+        Counts the track playing, the one being processed, the ones already
+        prepared and waiting for the play slot, and those still queued for
+        processing.
+        """
+        queue = self._queues.get((guild_id, channel_id))
+        if queue is None:
+            return 0
+        self._prune_cancelled(queue)
+        return (
+            (1 if queue.playing else 0)
+            + (1 if queue.processing else 0)
+            + len(queue.prepared)
+            + queue.waiting
+        )
 
     def is_busy(self, guild_id: int, channel_id: int) -> bool:
-        """True when another request currently holds this channel's lock."""
-        lock = self._vc_locks.get((guild_id, channel_id))
-        return lock is not None and lock.locked()
+        """True when anything is in flight for this channel."""
+        queue = self._queues.get((guild_id, channel_id))
+        if queue is None:
+            return False
+        self._prune_cancelled(queue)
+        return bool(
+            queue.playing or queue.processing or queue.prepared or queue.waiting
+        )
 
-    def cancel_event(self, guild_id: int, channel_id: int) -> asyncio.Event:
-        """The cooperative-cancel flag for one voice channel (created on demand)."""
-        key = (guild_id, channel_id)
-        if key not in self._cancel_events:
-            self._cancel_events[key] = asyncio.Event()
-        return self._cancel_events[key]
+    @staticmethod
+    def _prune_cancelled(queue: _ChannelQueue) -> None:
+        """Drop prepared tracks that were cancelled — they will never play."""
+        queue.prepared = [r for r in queue.prepared if not r.cancel.is_set()]
 
-    def clear_cancel(self, guild_id: int, channel_id: int) -> None:
-        """Reset the cancel flag. Called by the lock holder on acquire (not
-        by the canceller), so a fresh request never inherits a stale flag."""
-        self.cancel_event(guild_id, channel_id).clear()
-
-    def is_cancelled(self, guild_id: int, channel_id: int) -> bool:
-        event = self._cancel_events.get((guild_id, channel_id))
-        return event is not None and event.is_set()
+    def cancel_target(self, guild_id: int, channel_id: int) -> VoiceRequest | None:
+        """The request !cancel stops: the playing one first, then the one being
+        processed, then the first prepared track waiting for the play slot."""
+        queue = self._queues.get((guild_id, channel_id))
+        if queue is None:
+            return None
+        if queue.playing is not None:
+            return queue.playing
+        if queue.processing is not None:
+            return queue.processing
+        self._prune_cancelled(queue)
+        return queue.prepared[0] if queue.prepared else None
 
     def request_cancel(self, guild_id: int, channel_id: int) -> bool:
-        """Flag the active request on this channel to stop at its next step.
+        """Flag the request !cancel should stop.
 
-        Returns True when a request currently holds the channel lock. When
-        idle nothing is flagged (there is nothing to stop) and False is
-        returned. A cancel landing in the gap between lock acquire and
-        clear_cancel is dropped — the request barely started, retry if needed.
+        Returns True when something was flagged. When the channel is idle
+        nothing is flagged (there is nothing to stop) and False is returned.
         """
-        if not self.is_busy(guild_id, channel_id):
+        target = self.cancel_target(guild_id, channel_id)
+        if target is None:
             return False
-        self.cancel_event(guild_id, channel_id).set()
+        target.cancel.set()
         return True
+
+    @staticmethod
+    def is_cancelled(request: VoiceRequest) -> bool:
+        """True when this request was asked to stop."""
+        return request.cancel.is_set()
 
     async def process_turns(
         self,

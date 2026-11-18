@@ -7,7 +7,7 @@ A Discord bot that synthesizes multi-turn dialogue using Piper TTS + RVC voice c
 - **Multi-turn dialogue**: Use `%voice_name text` syntax to switch voices mid-sentence
 - **TTS + RVC pipeline**: Piper TTS generates base speech, RVC converts to character voices
 - **Prefix & slash commands**: Use `!speak` or `/speak`
-- **Per-voice-channel queue**: Sequential processing prevents overlapping audio
+- **Per-voice-channel queue**: One track plays at a time; the next one is downloaded and converted in the background so it starts the moment the current track ends
 - **CPU-friendly**: Works without GPU (slower but functional)
 
 ## Example
@@ -222,7 +222,7 @@ BOT_DRY_RUN=1
     model path + mtime + `pitch` + `f0_method`, so re-run the tool after retuning a voice —
     stale entries are ignored. The done status warns about unprofiled voices.
 - `!generate <voice[,voice2,...]> <prompt>` — An LLM (OpenRouter) writes spoken text from your prompt, then it's played through the normal pipeline. One voice gives a monologue (e.g. `!generate trump a rant about tiny keyboards`); comma-separated voices give a multi-voice dialogue where the LLM takes turns (e.g. `!generate trump,snake arguing which is better, burger king or mcdonalds`)
-- `!cancel` — Skip the request currently being processed or playing and move on to the next one in queue (queued requests keep their place). Replies `Nothing to skip` when nothing is running.
+- `!cancel` — Skip the request currently playing, or the one being processed when nothing is playing, and move on to the next one in queue (queued requests keep their place). Replies `Nothing to skip` when nothing is running.
 - `!voices` — List available voices
 - `!addvoice <search terms>` — Search, select, install and sync an RVC model (Manage Server required)
 - `!removevoice <voice>` — Confirm removal of a voice and its unshared models (Manage Server required)

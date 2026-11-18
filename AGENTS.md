@@ -181,6 +181,15 @@ python tools/rvc_models.py sync      # retry/reconcile voice models to both GPU 
   Flux voice ids are `flux-<name>-en` (36 total).
 
 **Everything else**
+- Per voice channel the bot runs two slots (`ttsbot/pipeline.py`): a depth-1
+  *processing* pipeline (download -> convert/TTS) and a depth-1 *play* slot.
+  A track is prepared while the previous one plays, so it starts the moment
+  the current track ends; requests are queued, never rejected, and play in
+  request order. The cancel flag is per REQUEST, not per channel — with a
+  track preparing in parallel, a channel-wide flag would abort the wrong one
+  (`!cancel` targets the playing track first, else the one being processed).
+  Prepared files must outlive the processing slot: they are deleted after
+  playback, not when preparation ends.
 - Voice models are canonical on boksi in `rvc_models/<voice>/`.
   `tools/rvc_models.py add/add-zip` installs locally, edits
   `config/voices.yaml`, then WOLs ifrit and rsyncs the voice dir to the same

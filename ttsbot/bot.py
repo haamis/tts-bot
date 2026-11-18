@@ -313,12 +313,11 @@ class TTSBot(commands.Bot):
         return getattr(voice, "channel", None)
 
     def _cancel_active(self, guild, author) -> str:
-        """Flag the active request to stop and cut playback immediately.
+        """Flag the request to stop and cut playback immediately.
 
-        Returns the reply text. Only the active (lock-holding) request is
-        affected — queued requests keep their place and run next. Phases
-        before the channel lock is acquired (LLM/search/probe) are not
-        cancellable; retry once generation starts.
+        Returns the reply text. The playing request is cancelled first; when
+        nothing is playing, the request being processed is cancelled instead.
+        Other queued requests keep their place and run next.
         """
         if guild is None:
             return "❌ This command must be used in a server."
@@ -522,63 +521,73 @@ class TTSBot(commands.Bot):
             )
             return
         dur_note = f" ({self._fmt_duration(duration)})" if duration else ""
-        if duration is not None:
-            await set_status(f"⏳ Downloading audio{dur_note}...")
 
         workdir = self.pipeline.temp_dir / f"rvc_{uuid.uuid4().hex[:8]}"
         # Dry run keeps the download around for inspection; every other path
         # (success, download/convert/playback failure) cleans up.
         keep_files = self.env["BOT_DRY_RUN"]
 
-        queued = self.pipeline.is_busy(guild.id, voice_channel.id)
-        if queued:
-            await set_status("⏳ Queued — waiting for the current request to finish...")
-        async with self.pipeline.channel_lock(guild.id, voice_channel.id):
-            if queued:
-                await set_status(f"⏳ Downloading audio{dur_note}...")
-            # Clear here (not in the canceller) so this holder never
-            # inherits a stale flag from an earlier request.
-            self.pipeline.clear_cancel(guild.id, voice_channel.id)
-            cancel = self.pipeline.cancel_event(guild.id, voice_channel.id)
+        request = self.pipeline.new_request(guild.id, voice_channel.id)
+        cancel = request.cancel
+        ahead = self.pipeline.tracks_ahead(guild.id, voice_channel.id)
+        if ahead:
+            await set_status(f"⏳ Queued ({ahead} ahead) — preparing in the background...")
+        try:
             try:
-                try:
-                    source_path = await self.ytdlp.download(url, workdir)
-                except YtdlpAuthError:
-                    log.warning("yt-dlp download blocked (login/age-gate): %s", url)
-                    await set_status(
-                        "❌ This video is age-restricted or needs a YouTube login, "
-                        "so I can't download it. Try a different video or an "
-                        "age-unrestricted upload."
-                    )
-                    return
-                except Exception as e:
-                    log.exception("yt-dlp download failed")
-                    await set_status(f"❌ Download failed: {e}")
-                    return
-
-                if cancel.is_set():
-                    raise RequestCancelled("cancelled")
-
-                if self.env["BOT_DRY_RUN"]:
-                    await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
-                    return
-
-                try:
-                    diar_result = None
-                    if len(voice_cfgs) == 1:
-                        await self._convert_single(source_path, voice_cfgs[0], workdir, dur_note, set_status, cancel=cancel)
-                    else:
-                        diar_result = await self._convert_multivoice(
-                            source_path, voice_cfgs, workdir, set_status, cancel=cancel
+                # Prepare in the depth-1 processing pipeline: the download and
+                # the conversion run while another track is still playing.
+                async with self.pipeline.processing_slot(request):
+                    await set_status(f"⏳ Downloading audio{dur_note}...")
+                    try:
+                        source_path = await self.ytdlp.download(url, workdir)
+                    except YtdlpAuthError:
+                        log.warning("yt-dlp download blocked (login/age-gate): %s", url)
+                        await set_status(
+                            "❌ This video is age-restricted or needs a YouTube login, "
+                            "so I can't download it. Try a different video or an "
+                            "age-unrestricted upload."
                         )
-                except RequestCancelled:
-                    raise
-                except Exception as e:
-                    log.exception("RVC conversion failed")
-                    await set_status(f"❌ Conversion failed: {e}")
-                    return
+                        return
+                    except Exception as e:
+                        log.exception("yt-dlp download failed")
+                        await set_status(f"❌ Download failed: {e}")
+                        return
 
-                try:
+                    if cancel.is_set():
+                        raise RequestCancelled("cancelled")
+
+                    if self.env["BOT_DRY_RUN"]:
+                        await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
+                        return
+
+                    try:
+                        diar_result = None
+                        if len(voice_cfgs) == 1:
+                            await self._convert_single(source_path, voice_cfgs[0], workdir, dur_note, set_status, cancel=cancel)
+                        else:
+                            diar_result = await self._convert_multivoice(
+                                source_path, voice_cfgs, workdir, set_status, cancel=cancel
+                            )
+                    except RequestCancelled:
+                        raise
+                    except Exception as e:
+                        log.exception("RVC conversion failed")
+                        await set_status(f"❌ Conversion failed: {e}")
+                        return
+            except RequestCancelled:
+                raise
+            except Exception as e:
+                log.exception("RVC processing failed")
+                await set_status(f"❌ Processing failed: {e}")
+                return
+
+            # Prepared: the track waits for the play slot, so it starts right
+            # after the current one ends.
+            self.pipeline.mark_prepared(request)
+            if self.pipeline.playing_request(guild.id, voice_channel.id) is not None:
+                await set_status("🎧 Ready — waiting for the current track to finish...")
+            try:
+                async with self.pipeline.play_slot(request):
                     await self.player.connect(voice_channel)
                     if diar_result is not None:
                         await set_status(
@@ -588,25 +597,25 @@ class TTSBot(commands.Bot):
                     else:
                         await set_status(f"🔊 Playing **{voices[0]}** conversion...")
                     await self.player.play_sequence(voice_channel, [str(workdir / "converted.wav")], cancel=cancel)
-                    if diar_result is not None:
-                        await set_status(
-                            f"✅ Done. ({diarize.result_summary(diar_result)})"
-                            f"{self._unused_voices_note(diar_result, voices)}"
-                            f"{self._rvc_slow_path_note()}"
-                        )
-                    else:
-                        await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
-                except RequestCancelled:
-                    raise
-                except Exception as e:
-                    log.exception("RVC playback failed")
-                    await set_status(f"❌ Error: {e}")
+                if diar_result is not None:
+                    await set_status(
+                        f"✅ Done. ({diarize.result_summary(diar_result)})"
+                        f"{self._unused_voices_note(diar_result, voices)}"
+                        f"{self._rvc_slow_path_note()}"
+                    )
+                else:
+                    await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
             except RequestCancelled:
-                log.info("RVC request cancelled (guild %s)", guild.id)
-                await set_status("⏭ Skipped.")
-            finally:
-                if not keep_files:
-                    shutil.rmtree(workdir, ignore_errors=True)
+                raise
+            except Exception as e:
+                log.exception("RVC playback failed")
+                await set_status(f"❌ Error: {e}")
+        except RequestCancelled:
+            log.info("RVC request cancelled (guild %s)", guild.id)
+            await set_status("⏭ Skipped.")
+        finally:
+            if not keep_files:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     async def _process_rsing(
         self,
@@ -666,121 +675,133 @@ class TTSBot(commands.Bot):
             )
             return
         dur_note = f" ({self._fmt_duration(duration)})" if duration else ""
-        if duration is not None:
-            await set_status(f"⏳ Downloading audio{dur_note}...")
 
         workdir = self.pipeline.temp_dir / f"rsing_{uuid.uuid4().hex[:8]}"
         keep_files = self.env["BOT_DRY_RUN"]
 
-        queued = self.pipeline.is_busy(guild.id, voice_channel.id)
-        if queued:
-            await set_status("⏳ Queued — waiting for the current request to finish...")
-        async with self.pipeline.channel_lock(guild.id, voice_channel.id):
-            if queued:
-                await set_status(f"⏳ Downloading audio{dur_note}...")
-            self.pipeline.clear_cancel(guild.id, voice_channel.id)
-            cancel = self.pipeline.cancel_event(guild.id, voice_channel.id)
+        request = self.pipeline.new_request(guild.id, voice_channel.id)
+        cancel = request.cancel
+        ahead = self.pipeline.tracks_ahead(guild.id, voice_channel.id)
+        if ahead:
+            await set_status(f"⏳ Queued ({ahead} ahead) — preparing in the background...")
+        try:
             try:
-                try:
-                    source_path = await self.ytdlp.download(url, workdir)
-                except YtdlpAuthError:
-                    log.warning("yt-dlp download blocked (login/age-gate): %s", url)
-                    await set_status(
-                        "❌ This video is age-restricted or needs a YouTube login, "
-                        "so I can't download it. Try a different video or an "
-                        "age-unrestricted upload."
-                    )
-                    return
-                except Exception as e:
-                    log.exception("yt-dlp download failed")
-                    await set_status(f"❌ Download failed: {e}")
-                    return
+                # Prepare in the depth-1 processing pipeline: the download and
+                # the conversion run while another track is still playing.
+                async with self.pipeline.processing_slot(request):
+                    await set_status(f"⏳ Downloading audio{dur_note}...")
+                    try:
+                        source_path = await self.ytdlp.download(url, workdir)
+                    except YtdlpAuthError:
+                        log.warning("yt-dlp download blocked (login/age-gate): %s", url)
+                        await set_status(
+                            "❌ This video is age-restricted or needs a YouTube login, "
+                            "so I can't download it. Try a different video or an "
+                            "age-unrestricted upload."
+                        )
+                        return
+                    except Exception as e:
+                        log.exception("yt-dlp download failed")
+                        await set_status(f"❌ Download failed: {e}")
+                        return
 
-                if cancel.is_set():
-                    raise RequestCancelled("cancelled")
+                    if cancel.is_set():
+                        raise RequestCancelled("cancelled")
 
-                if self.env["BOT_DRY_RUN"]:
-                    await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
-                    return
+                    if self.env["BOT_DRY_RUN"]:
+                        await set_status(f"✅ Dry run: download complete ({source_path}); conversion skipped.")
+                        return
 
-                try:
-                    await set_status("⏳ Separating vocals from instrumental...")
-                    vocals_path = workdir / "vocals.wav"
-                    instrumental_path = workdir / "instrumental.wav"
-                    await self.pipeline.rvc.separate_vocals(
-                        source_path, vocals_path, instrumental_path
-                    )
-
-                    diar_result = None
-                    if len(voice_cfgs) == 1:
-                        # Single voice: convert entire vocals track
-                        await set_status(f"⏳ Converting vocals to **{voice_cfgs[0].name}**{dur_note}...")
-                        converted_vocals_path = workdir / "vocals_rvc.wav"
-                        primary_engine = self.env.get("RVC_ENGINE", "rvc")
-                        engines_to_try = fallback_chain(
-                            primary_engine,
-                            self.env.get("RVC_FALLBACK", "auto"),
-                            bool(voice_cfgs[0].reference_clip),
+                    try:
+                        await set_status("⏳ Separating vocals from instrumental...")
+                        vocals_path = workdir / "vocals.wav"
+                        instrumental_path = workdir / "instrumental.wav"
+                        await self.pipeline.rvc.separate_vocals(
+                            source_path, vocals_path, instrumental_path
                         )
 
-                        last_error = None
-                        for engine in engines_to_try:
-                            try:
-                                if engine == "chatterbox_vc":
-                                    if not voice_cfgs[0].reference_clip:
-                                        raise RuntimeError(f"Voice '{voice_cfgs[0].name}' has no reference_clip for Chatterbox-VC")
-                                    await self.pipeline.rvc.convert_vc(
-                                        input_path=str(vocals_path),
-                                        output_path=str(converted_vocals_path),
-                                        target_voice_path=voice_cfgs[0].reference_clip,
-                                    )
-                                else:
-                                    await self.pipeline.rvc.convert(
-                                        input_path=str(vocals_path),
-                                        output_path=str(converted_vocals_path),
-                                        model_path=voice_cfgs[0].rvc_model,
-                                        index_path=voice_cfgs[0].rvc_index,
-                                        pitch=voice_cfgs[0].pitch,
-                                        index_rate=voice_cfgs[0].index_rate,
-                                        f0_method=voice_cfgs[0].f0_method,
-                                        speaker_id=voice_cfgs[0].speaker_id,
-                                    )
-                                if engine != primary_engine:
-                                    await set_status(f"⚠️ Fallback to {engine}: {last_error}")
-                                break
-                            except Exception as e:
-                                if isinstance(e, RVCRequestError):
-                                    raise
-                                last_error = e
-                                log.warning("Engine %s failed for %s: %s", engine, voice_cfgs[0].name, e)
-                                continue
+                        diar_result = None
+                        if len(voice_cfgs) == 1:
+                            # Single voice: convert entire vocals track
+                            await set_status(f"⏳ Converting vocals to **{voice_cfgs[0].name}**{dur_note}...")
+                            converted_vocals_path = workdir / "vocals_rvc.wav"
+                            primary_engine = self.env.get("RVC_ENGINE", "rvc")
+                            engines_to_try = fallback_chain(
+                                primary_engine,
+                                self.env.get("RVC_FALLBACK", "auto"),
+                                bool(voice_cfgs[0].reference_clip),
+                            )
+
+                            last_error = None
+                            for engine in engines_to_try:
+                                try:
+                                    if engine == "chatterbox_vc":
+                                        if not voice_cfgs[0].reference_clip:
+                                            raise RuntimeError(f"Voice '{voice_cfgs[0].name}' has no reference_clip for Chatterbox-VC")
+                                        await self.pipeline.rvc.convert_vc(
+                                            input_path=str(vocals_path),
+                                            output_path=str(converted_vocals_path),
+                                            target_voice_path=voice_cfgs[0].reference_clip,
+                                        )
+                                    else:
+                                        await self.pipeline.rvc.convert(
+                                            input_path=str(vocals_path),
+                                            output_path=str(converted_vocals_path),
+                                            model_path=voice_cfgs[0].rvc_model,
+                                            index_path=voice_cfgs[0].rvc_index,
+                                            pitch=voice_cfgs[0].pitch,
+                                            index_rate=voice_cfgs[0].index_rate,
+                                            f0_method=voice_cfgs[0].f0_method,
+                                            speaker_id=voice_cfgs[0].speaker_id,
+                                        )
+                                    if engine != primary_engine:
+                                        await set_status(f"⚠️ Fallback to {engine}: {last_error}")
+                                    break
+                                except Exception as e:
+                                    if isinstance(e, RVCRequestError):
+                                        raise
+                                    last_error = e
+                                    log.warning("Engine %s failed for %s: %s", engine, voice_cfgs[0].name, e)
+                                    continue
+                            else:
+                                raise RuntimeError(f"All VC engines failed for {voice_cfgs[0].name}: {last_error}")
+
                         else:
-                            raise RuntimeError(f"All VC engines failed for {voice_cfgs[0].name}: {last_error}")
+                            # Multi-voice: diarize clean vocals, convert per-speaker
+                            diar_result = await self._convert_multivoice_rsing(
+                                str(vocals_path), voice_cfgs, workdir, set_status, cancel=cancel
+                            )
+                            converted_vocals_path = workdir / "vocals_rvc.wav"
 
-                    else:
-                        # Multi-voice: diarize clean vocals, convert per-speaker
-                        diar_result = await self._convert_multivoice_rsing(
-                            str(vocals_path), voice_cfgs, workdir, set_status, cancel=cancel
+                        await set_status("⏳ Mixing converted vocals with instrumental...")
+                        final_path = workdir / "converted.wav"
+                        await asyncio.to_thread(
+                            self._mix_vocals_instrumental,
+                            str(converted_vocals_path),
+                            str(instrumental_path),
+                            str(final_path),
                         )
-                        converted_vocals_path = workdir / "vocals_rvc.wav"
 
-                    await set_status("⏳ Mixing converted vocals with instrumental...")
-                    final_path = workdir / "converted.wav"
-                    await asyncio.to_thread(
-                        self._mix_vocals_instrumental,
-                        str(converted_vocals_path),
-                        str(instrumental_path),
-                        str(final_path),
-                    )
+                    except RequestCancelled:
+                        raise
+                    except Exception as e:
+                        log.exception("RVC conversion failed")
+                        await set_status(f"❌ Conversion failed: {e}")
+                        return
+            except RequestCancelled:
+                raise
+            except Exception as e:
+                log.exception("Rsing processing failed")
+                await set_status(f"❌ Processing failed: {e}")
+                return
 
-                except RequestCancelled:
-                    raise
-                except Exception as e:
-                    log.exception("RVC conversion failed")
-                    await set_status(f"❌ Conversion failed: {e}")
-                    return
-
-                try:
+            # Prepared: the track waits for the play slot, so it starts right
+            # after the current one ends.
+            self.pipeline.mark_prepared(request)
+            if self.pipeline.playing_request(guild.id, voice_channel.id) is not None:
+                await set_status("🎧 Ready — waiting for the current track to finish...")
+            try:
+                async with self.pipeline.play_slot(request):
                     await self.player.connect(voice_channel)
                     if diar_result is not None:
                         await set_status(
@@ -790,25 +811,25 @@ class TTSBot(commands.Bot):
                     else:
                         await set_status(f"🔊 Playing **{voices[0]}** (rsing)...")
                     await self.player.play_sequence(voice_channel, [str(final_path)], cancel=cancel)
-                    if diar_result is not None:
-                        await set_status(
-                            f"✅ Done. ({diarize.result_summary(diar_result)})"
-                            f"{self._unused_voices_note(diar_result, voices)}"
-                            f"{self._rvc_slow_path_note()}"
-                        )
-                    else:
-                        await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
-                except RequestCancelled:
-                    raise
-                except Exception as e:
-                    log.exception("RVC playback failed")
-                    await set_status(f"❌ Error: {e}")
+                if diar_result is not None:
+                    await set_status(
+                        f"✅ Done. ({diarize.result_summary(diar_result)})"
+                        f"{self._unused_voices_note(diar_result, voices)}"
+                        f"{self._rvc_slow_path_note()}"
+                    )
+                else:
+                    await set_status(f"✅ Done.{self._rvc_slow_path_note()}")
             except RequestCancelled:
-                log.info("Rsing request cancelled (guild %s)", guild.id)
-                await set_status("⏭ Skipped.")
-            finally:
-                if not keep_files:
-                    shutil.rmtree(workdir, ignore_errors=True)
+                raise
+            except Exception as e:
+                log.exception("Rsing playback failed")
+                await set_status(f"❌ Error: {e}")
+        except RequestCancelled:
+            log.info("Rsing request cancelled (guild %s)", guild.id)
+            await set_status("⏭ Skipped.")
+        finally:
+            if not keep_files:
+                shutil.rmtree(workdir, ignore_errors=True)
 
     async def _convert_multivoice_rsing(
         self,
@@ -1220,66 +1241,76 @@ class TTSBot(commands.Bot):
             await set_status("❌ You must be in a voice channel.")
             return
 
-        await self._generate_and_play(turns, guild, voice_channel, status=status)
+        async def produce():
+            return turns
 
-    async def _generate_and_play(self, turns, guild: discord.Guild, voice_channel: discord.VoiceChannel, status=None):
-        """Shared tail of !speak and !generate: Piper->RVC generation and
-        playback for the given turns, serialized per voice channel."""
-        set_status = self._status_editor(status)
+        await self._process_turns_request(guild, voice_channel, set_status, produce)
 
-        # Hold the per-channel lock across generation AND playback so
-        # concurrent requests don't overlap audio.
-        queued = self.pipeline.is_busy(guild.id, voice_channel.id)
-        if queued:
-            await set_status("⏳ Queued — waiting for the current request to finish...")
-        async with self.pipeline.channel_lock(guild.id, voice_channel.id):
-            if queued:
+    async def _process_turns_request(self, guild, voice_channel, set_status, produce):
+        """Shared tail of !speak and !generate: produce the turns, prepare them,
+        then play them — pipelined per voice channel.
+
+        `produce` returns the turns to speak (None aborts the request after
+        reporting the reason). It runs inside the processing slot, so the LLM
+        call behind !generate is part of the depth-1 pipeline.
+        """
+        request = self.pipeline.new_request(guild.id, voice_channel.id)
+        cancel = request.cancel
+        ahead = self.pipeline.tracks_ahead(guild.id, voice_channel.id)
+        if ahead:
+            await set_status(f"⏳ Queued ({ahead} ahead) — preparing in the background...")
+        try:
+            async with self.pipeline.processing_slot(request):
+                turns = await produce()
+                if turns is None:
+                    return
                 await set_status("⏳ Generating audio...")
-            # Clear here (not in the canceller) so this holder never
-            # inherits a stale flag from an earlier request.
-            self.pipeline.clear_cancel(guild.id, voice_channel.id)
-            cancel = self.pipeline.cancel_event(guild.id, voice_channel.id)
-            try:
                 results = await self.pipeline.process_turns(
                     turns=turns,
                     voices=self.config.voices,
                     dry_run=self.env["BOT_DRY_RUN"],
                     cancel=cancel,
                 )
-            except RequestCancelled:
-                log.info("Speak/generate request cancelled (guild %s)", guild.id)
-                await set_status("⏭ Skipped.")
-                return
-            except Exception as e:
-                log.exception("Generation failed")
-                await set_status(f"❌ Generation failed: {e}")
-                return
+        except RequestCancelled:
+            log.info("Speak/generate request cancelled (guild %s)", guild.id)
+            await set_status("⏭ Skipped.")
+            return
+        except Exception as e:
+            log.exception("Generation failed")
+            await set_status(f"❌ Generation failed: {e}")
+            return
 
-            output_files = [r.path for r in results]
+        output_files = [r.path for r in results]
 
-            if self.env["BOT_DRY_RUN"]:
-                await set_status(f"✅ Dry run: generated {len(output_files)} file(s).")
-                return
+        if self.env["BOT_DRY_RUN"]:
+            await set_status(f"✅ Dry run: generated {len(output_files)} file(s).")
+            return
 
-            try:
+        # Prepared: the track waits for the play slot, so it starts right
+        # after the current one ends.
+        self.pipeline.mark_prepared(request)
+        if self.pipeline.playing_request(guild.id, voice_channel.id) is not None:
+            await set_status("🎧 Ready — waiting for the current track to finish...")
+        try:
+            async with self.pipeline.play_slot(request):
                 # Join only after generation completes, so the bot doesn't sit
                 # in the channel with connect/disconnect noise while working.
                 await self.player.connect(voice_channel)
                 await set_status(f"🔊 Playing {len(turns)} turn(s)...")
                 await self.player.play_sequence(voice_channel, output_files, cancel=cancel)
-                await set_status(self._final_status(results) + self._rvc_slow_path_note())
-            except RequestCancelled:
-                log.info("Speak/generate playback cancelled (guild %s)", guild.id)
-                await set_status("⏭ Skipped.")
-            except Exception as e:
-                log.exception("Playback failed")
-                await set_status(f"❌ Error: {e}")
-            finally:
-                for f in output_files:
-                    try:
-                        Path(f).unlink(missing_ok=True)
-                    except Exception:
-                        pass
+            await set_status(self._final_status(results) + self._rvc_slow_path_note())
+        except RequestCancelled:
+            log.info("Speak/generate playback cancelled (guild %s)", guild.id)
+            await set_status("⏭ Skipped.")
+        except Exception as e:
+            log.exception("Playback failed")
+            await set_status(f"❌ Error: {e}")
+        finally:
+            for f in output_files:
+                try:
+                    Path(f).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     @staticmethod
     def _final_status(results) -> str:
@@ -1344,38 +1375,38 @@ class TTSBot(commands.Bot):
             await set_status("❌ You must be in a voice channel.")
             return
 
-        await set_status(f"⏳ Asking {self.llm.model}...")
-        full_prompt = f"{prompt}\n{self.config.generate_prompt_suffix}"
-        try:
-            if len(voices) == 1:
-                # Monologue: one Turn directly, bypassing all tag/dialogue
-                # parsing so a stray % in LLM text can't reroute voices.
-                text = await self.llm.generate(full_prompt, self.config.max_chars)
-                turns = [Turn(voice=voices[0], text=text)]
-                detail = f"{len(text)} chars"
-            else:
+        async def produce():
+            await set_status(f"⏳ Asking {self.llm.model}...")
+            full_prompt = f"{prompt}\n{self.config.generate_prompt_suffix}"
+            try:
+                if len(voices) == 1:
+                    # Monologue: one Turn directly, bypassing all tag/dialogue
+                    # parsing so a stray % in LLM text can't reroute voices.
+                    text = await self.llm.generate(full_prompt, self.config.max_chars)
+                    await set_status(f"🧠 Got {len(text)} chars")
+                    return [Turn(voice=voices[0], text=text)]
                 turns = await self.llm.generate_dialogue(
                     full_prompt, self.config.max_chars, voices
                 )
-                detail = f"{len(turns)} turn(s)"
-        except LlmTextTooLong as e:
-            await set_status(f"❌ {e}")
-            return
-        except LlmRateLimited as e:
-            log.warning("LLM rate-limited: %s", e)
-            await set_status(f"⚠️ {e}")
-            return
-        except LlmDialogueError as e:
-            log.warning("LLM dialogue malformed: %s", e)
-            await set_status(f"❌ {e}")
-            return
-        except Exception as e:
-            log.exception("LLM request failed")
-            await set_status(f"❌ LLM request failed: {e}")
-            return
+                await set_status(f"🧠 Got {len(turns)} turn(s)")
+                return turns
+            except LlmTextTooLong as e:
+                await set_status(f"❌ {e}")
+                return None
+            except LlmRateLimited as e:
+                log.warning("LLM rate-limited: %s", e)
+                await set_status(f"⚠️ {e}")
+                return None
+            except LlmDialogueError as e:
+                log.warning("LLM dialogue malformed: %s", e)
+                await set_status(f"❌ {e}")
+                return None
+            except Exception as e:
+                log.exception("LLM request failed")
+                await set_status(f"❌ LLM request failed: {e}")
+                return None
 
-        await set_status(f"🧠 Got {detail} — generating audio...")
-        await self._generate_and_play(turns, guild, voice_channel, status=status)
+        await self._process_turns_request(guild, voice_channel, set_status, produce)
 
 
 async def main():

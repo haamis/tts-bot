@@ -488,12 +488,17 @@ def _gen_ns(llm):
     from types import SimpleNamespace
 
     import ttsbot.bot as bot_mod
+    from ttsbot.pipeline import Pipeline
 
-    return SimpleNamespace(
+    ns = SimpleNamespace(
         llm=llm,
         config=SimpleNamespace(generate_prompt_suffix="Stay short.", max_chars=500),
         _status_editor=bot_mod.TTSBot._status_editor,
+        # The generate flow now queues on the per-channel pipeline.
+        pipeline=Pipeline(tts=None, rvc=None),
     )
+    ns._process_turns_request = lambda *a, **kw: bot_mod.TTSBot._process_turns_request(ns, *a, **kw)
+    return ns
 
 
 class _FailLLM:

@@ -120,49 +120,68 @@ def turns(n=2):
 def test_request_cancel_idle_returns_false_and_sets_nothing():
     p = Pipeline(tts=None, rvc=None)
     assert p.request_cancel(1, 2) is False
-    assert not p.is_cancelled(1, 2)
+    assert p.cancel_target(1, 2) is None
 
 
-async def test_request_cancel_busy_sets_flag_and_clear_resets():
+async def test_request_cancel_flags_the_running_request():
     p = Pipeline(tts=None, rvc=None)
-    async with p.channel_lock(1, 2):
+    request = p.new_request(1, 2)
+    async with p.processing_slot(request):
         assert p.request_cancel(1, 2) is True
-        assert p.is_cancelled(1, 2)
+        assert p.is_cancelled(request)
         # Other channels are unaffected
-        assert not p.is_cancelled(1, 3)
-        p.clear_cancel(1, 2)
-        assert not p.is_cancelled(1, 2)
+        other = p.new_request(1, 3)
+        assert not p.is_cancelled(other)
 
 
-async def test_cancelled_holder_releases_lock_and_waiter_starts_clean():
-    """Skipped request aborts; next in queue clears the stale flag and runs."""
+async def test_cancelled_holder_releases_slot_and_waiter_starts_clean():
+    """Skipped request aborts; the next in queue runs with a fresh flag."""
     p = Pipeline(tts=None, rvc=None)
     order = []
 
     async def holder():
-        async with p.channel_lock(1, 2):
-            p.clear_cancel(1, 2)
-            event = p.cancel_event(1, 2)
-            await asyncio.wait_for(event.wait(), timeout=5)
+        request = p.new_request(1, 2)
+        async with p.processing_slot(request):
+            await asyncio.wait_for(request.cancel.wait(), timeout=5)
             order.append("holder-saw-cancel")
             raise RequestCancelled("cancelled")
 
     async def waiter():
-        async with p.channel_lock(1, 2):
-            p.clear_cancel(1, 2)
-            assert not p.is_cancelled(1, 2)
+        request = p.new_request(1, 2)
+        async with p.processing_slot(request):
+            assert not p.is_cancelled(request)
             order.append("waiter-ran")
 
     task = asyncio.create_task(holder())
     while not p.is_busy(1, 2):
         await asyncio.sleep(0)
     queued = asyncio.create_task(waiter())
-    await asyncio.sleep(0)  # let the waiter queue on the lock
+    await asyncio.sleep(0)  # let the waiter queue on the slot
     assert p.request_cancel(1, 2) is True
     with pytest.raises(RequestCancelled):
         await task
     await queued
     assert order == ["holder-saw-cancel", "waiter-ran"]
+
+
+async def test_cancel_targets_the_playing_request_first():
+    """!cancel hits the playing track, not the one being processed."""
+    p = Pipeline(tts=None, rvc=None)
+    playing = p.new_request(1, 2)
+    processing = p.new_request(1, 2)
+    async with p.play_slot(playing):
+        async with p.processing_slot(processing):
+            assert p.request_cancel(1, 2) is True
+            assert p.is_cancelled(playing)
+            assert not p.is_cancelled(processing)
+
+
+async def test_cancel_targets_the_processing_request_when_nothing_plays():
+    p = Pipeline(tts=None, rvc=None)
+    processing = p.new_request(1, 2)
+    async with p.processing_slot(processing):
+        assert p.request_cancel(1, 2) is True
+        assert p.is_cancelled(processing)
 
 
 # --- process_turns checkpoints ------------------------------------------------
@@ -266,17 +285,18 @@ def test_cancel_active_idle_reports_nothing_running():
     guild = FakeGuild(id=7)
     text = TTSBot._cancel_active(bot, guild, FakeAuthor(channel))
     assert "Nothing to skip" in text
-    assert not bot.pipeline.is_cancelled(guild.id, channel.id)
+    assert bot.pipeline.cancel_target(guild.id, channel.id) is None
 
 
-async def test_cancel_active_busy_flags_channel():
+async def test_cancel_active_busy_flags_request():
     bot = make_bot()
     channel = FakeChannel(id=3)
     guild = FakeGuild(id=7)
-    async with bot.pipeline.channel_lock(guild.id, channel.id):
+    request = bot.pipeline.new_request(guild.id, channel.id)
+    async with bot.pipeline.processing_slot(request):
         text = TTSBot._cancel_active(bot, guild, FakeAuthor(channel))
         assert "Skipping" in text
-        assert bot.pipeline.is_cancelled(guild.id, channel.id)
+        assert bot.pipeline.is_cancelled(request)
 
 
 def test_cancel_active_stops_playback_even_without_lock():
