@@ -15,7 +15,9 @@ Python 3.12.
   `~/rvc-gpu-server` (container `rvc-server`); WoL-capable.
 - **Windows desktop** (`192.168.1.161`): **RTX 4080**, optional *preferred*
   worker via Docker Desktop / WSL2; never woken. `RVC_CUDA_MEMORY_FRACTION=0.375`
-  caps its torch CUDA allocator at 6GB of the 16GB card, matching ifrit's 2060.
+  caps the container's torch CUDA use at 6GB of the 16GB card, matching ifrit's
+  2060: the server takes `RVC_CUDA_SERVER_SHARE` (default 1/3) of that budget
+  and the RVC worker the rest, so the two caps add up to 6GB.
 Every remote RVC / diarization / TTS call goes preferred 4080 → ifrit 2060 →
 local CPU on boksi. `RVC_GPU_SERVER_*` addresses ifrit, `RVC_GPU_PREFERRED_*`
 addresses the 4080. ifrit is not the 4080, and the 4080 is not ifrit.
