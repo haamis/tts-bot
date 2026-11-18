@@ -79,6 +79,12 @@ Docker publishes HTTP on Windows port **8001** and model-sync SSH on **2223**.
 Port 2223 deliberately avoids the temporary WSL bootstrap SSH on 2222.
 Keep these LAN-only; do not forward them from the internet.
 
+The worker is capped at **6GB of the card's 16GB** (`RVC_CUDA_MEMORY_FRACTION:
+"0.375"` in `compose.yaml`, applied by both the server and the RVC worker), so
+it behaves like ifrit's 6GB RTX 2060 and the shared 20s chunk default holds.
+Raise the fraction and `RVC_SERVER_CHUNK_SEC` together if you ever want the
+full card.
+
 In Administrator PowerShell, allow boksi through Windows Firewall:
 
 ```powershell

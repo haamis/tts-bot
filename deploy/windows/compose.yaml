@@ -7,6 +7,9 @@ services:
     gpus: all
     environment:
       ONNX_PROVIDER: CUDAExecutionProvider
+      # 6GB of the 16GB card (37.5%) — matches ifrit's RTX 2060 so chunk sizes
+      # and memory margins behave the same on both machines.
+      RVC_CUDA_MEMORY_FRACTION: "0.375"
     volumes:
       # Reuse ifrit's dependency image, but run this checkout's server code.
       - ${HOME}/TTS-bot/rvc-gpu-server:/app:ro
