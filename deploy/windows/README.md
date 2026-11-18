@@ -187,6 +187,7 @@ it again. Server-side inference errors do not trigger that connection cooldown.
 ```bash
 docker compose -f deploy/windows/compose.yaml ps
 docker compose -f deploy/windows/compose.yaml logs --tail 50 rvc-server
+docker compose -f deploy/windows/compose.yaml logs rvc-server | grep "Torch CUDA"  # cap lines
 docker compose -f deploy/windows/compose.yaml exec rvc-server nvidia-smi
 ```
 
