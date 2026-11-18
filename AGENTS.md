@@ -14,9 +14,11 @@ Python 3.12.
 - **ifrit** (`192.168.1.162`): the GPU server, **RTX 2060 6GB**, from
   `~/rvc-gpu-server` (container `rvc-server`); WoL-capable but only because
   NetworkManager arms magic-packet WoL (`wake-on-lan: magic` on every wired
-  profile): the ethtool flag is volatile, resets to `d` on boot, and a cloned
-  or reimaged disk loses the arming silently — that is how waking broke in
-  2026-11. Auto-suspend on idle is deliberate (electricity), not a fault.
+  profile): the ethtool flag is volatile — any cold power-up resets it to `d`
+  (warm reboots and suspend keep it), so a one-time arming can hold for months
+  and then die silently at the next cold power-off, which is how waking broke
+  in 2026-11 (the drive clone's power-down, not the `dd` copy itself).
+  Auto-suspend on idle is deliberate (electricity), not a fault.
 - **Windows desktop** (`192.168.1.161`): **RTX 4080**, optional *preferred*
   worker via Docker Desktop / WSL2; never woken. `RVC_CUDA_MEMORY_FRACTION=0.375`
   caps the container's torch CUDA use at 6GB of the 16GB card, matching ifrit's
