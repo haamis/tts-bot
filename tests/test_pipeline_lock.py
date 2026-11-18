@@ -103,27 +103,16 @@ async def test_tracks_ahead_is_per_channel():
 
 
 @pytest.mark.asyncio
-async def test_is_busy_tracks_in_flight_work():
-    p = Pipeline(tts=None, rvc=None)
-    assert not p.is_busy(1, 2)
-    request = p.new_request(1, 2)
-    async with p.processing_slot(request):
-        assert p.is_busy(1, 2)
-        assert not p.is_busy(1, 3)
-    assert not p.is_busy(1, 2)
-
-
-@pytest.mark.asyncio
 async def test_prepared_request_waits_for_the_play_slot():
     """A prepared track is queued for playback, not for processing."""
     p = Pipeline(tts=None, rvc=None)
     request = p.new_request(1, 2)
     p.mark_prepared(request)
-    assert p.is_busy(1, 2)
+    assert p.tracks_ahead(1, 2) == 1
     assert p.cancel_target(1, 2) is request
     async with p.play_slot(request):
         # While it plays it is the playing request.
         assert p.cancel_target(1, 2) is request
     # Leaving the slot clears it from the prepared list: nothing left to cancel.
     assert p.cancel_target(1, 2) is None
-    assert not p.is_busy(1, 2)
+    assert p.tracks_ahead(1, 2) == 0

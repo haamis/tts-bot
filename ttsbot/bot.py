@@ -537,6 +537,9 @@ class TTSBot(commands.Bot):
                 # Prepare in the depth-1 processing pipeline: the download and
                 # the conversion run while another track is still playing.
                 async with self.pipeline.processing_slot(request):
+                    # Cancelled while queued: skip the download entirely.
+                    if cancel.is_set():
+                        raise RequestCancelled("cancelled")
                     await set_status(f"⏳ Downloading audio{dur_note}...")
                     try:
                         source_path = await self.ytdlp.download(url, workdir)
@@ -689,6 +692,9 @@ class TTSBot(commands.Bot):
                 # Prepare in the depth-1 processing pipeline: the download and
                 # the conversion run while another track is still playing.
                 async with self.pipeline.processing_slot(request):
+                    # Cancelled while queued: skip the download entirely.
+                    if cancel.is_set():
+                        raise RequestCancelled("cancelled")
                     await set_status(f"⏳ Downloading audio{dur_note}...")
                     try:
                         source_path = await self.ytdlp.download(url, workdir)
@@ -1261,6 +1267,9 @@ class TTSBot(commands.Bot):
             await set_status(f"⏳ Queued ({ahead} ahead) — preparing in the background...")
         try:
             async with self.pipeline.processing_slot(request):
+                # Cancelled while queued: skip the LLM call and the synthesis.
+                if cancel.is_set():
+                    raise RequestCancelled("cancelled")
                 turns = await produce()
                 if turns is None:
                     return

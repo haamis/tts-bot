@@ -160,16 +160,6 @@ class Pipeline:
             + queue.waiting
         )
 
-    def is_busy(self, guild_id: int, channel_id: int) -> bool:
-        """True when anything is in flight for this channel."""
-        queue = self._queues.get((guild_id, channel_id))
-        if queue is None:
-            return False
-        self._prune_cancelled(queue)
-        return bool(
-            queue.playing or queue.processing or queue.prepared or queue.waiting
-        )
-
     @staticmethod
     def _prune_cancelled(queue: _ChannelQueue) -> None:
         """Drop prepared tracks that were cancelled — they will never play."""

@@ -153,7 +153,7 @@ async def test_cancelled_holder_releases_slot_and_waiter_starts_clean():
             order.append("waiter-ran")
 
     task = asyncio.create_task(holder())
-    while not p.is_busy(1, 2):
+    while not p.tracks_ahead(1, 2):
         await asyncio.sleep(0)
     queued = asyncio.create_task(waiter())
     await asyncio.sleep(0)  # let the waiter queue on the slot

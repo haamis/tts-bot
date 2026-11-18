@@ -1,5 +1,6 @@
 """Bot level: a request is prepared while the previous one is still playing."""
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -45,7 +46,12 @@ class FakePlayer:
             raise RequestCancelled("cancelled")
         self.played.append(files[0])
         self.started.set()
-        await self.release.wait()
+        while True:
+            if cancel is not None and cancel.is_set():
+                raise RequestCancelled("cancelled")
+            if self.release.is_set():
+                break
+            await asyncio.sleep(0.01)
 
 
 def make_bot(pipeline, player):
@@ -142,3 +148,147 @@ async def test_cancel_stops_the_track_being_processed_when_nothing_plays():
 
     assert player.played == []
     assert any("Skipped" in s for s in statuses)
+
+
+# --- the !rvc flow ------------------------------------------------------------
+
+
+class FakeYtdlp:
+    """Records downloads and proves they never overlap."""
+
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.downloads: list[str] = []
+
+    async def probe(self, url):
+        return None
+
+    async def download(self, url, workdir):
+        self.downloads.append(url)
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.05)
+        self.active -= 1
+        Path(workdir).mkdir(parents=True, exist_ok=True)
+        path = Path(workdir) / "source.wav"
+        path.write_bytes(b"")
+        return str(path)
+
+
+class FakeStatus:
+    def __init__(self):
+        self.contents: list[str] = []
+
+    async def edit(self, content):
+        self.contents.append(content)
+
+
+def make_rvc_bot(pipeline, player, ytdlp):
+    voice = SimpleNamespace(
+        name="snake",
+        rvc_model="model.pth",
+        rvc_index=None,
+        pitch=0,
+        index_rate=0.75,
+        f0_method="rmvpe",
+        speaker_id=0,
+        reference_clip=None,
+    )
+    bot = SimpleNamespace(
+        pipeline=pipeline,
+        player=player,
+        ytdlp=ytdlp,
+        config=SimpleNamespace(
+            voices={"snake": voice},
+            get_voice=lambda name: voice,
+        ),
+        env={"BOT_DRY_RUN": False},
+        _status_editor=TTSBot._status_editor,
+        _extract_url=TTSBot._extract_url,
+        _fmt_duration=TTSBot._fmt_duration,
+        _rvc_slow_path_note=lambda: "",
+    )
+
+    async def _convert_single(source_path, voice_cfg, workdir, dur_note, set_status, cancel=None):
+        Path(workdir, "converted.wav").write_bytes(b"")
+
+    bot._convert_single = _convert_single
+    bot._process_rvc = lambda *a, **kw: TTSBot._process_rvc(bot, *a, **kw)
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_rvc_downloads_while_playing_but_never_in_parallel(monkeypatch):
+    """The next video downloads during playback, one download at a time."""
+    import ttsbot.bot as bot_mod
+
+    async def _fake_voice_channel(ctx, bot):
+        return SimpleNamespace(id=2)
+
+    monkeypatch.setattr(bot_mod, "ensure_voice_channel", _fake_voice_channel)
+
+    pipeline = Pipeline(tts=None, rvc=None)
+    player = FakePlayer()
+    ytdlp = FakeYtdlp()
+    bot = make_rvc_bot(pipeline, player, ytdlp)
+    guild = SimpleNamespace(id=1)
+    status = FakeStatus()
+
+    first = asyncio.create_task(
+        bot._process_rvc(None, None, guild, ["snake"], "https://example.com/a", status=status)
+    )
+    await asyncio.wait_for(player.started.wait(), timeout=5)
+
+    second = asyncio.create_task(
+        bot._process_rvc(None, None, guild, ["snake"], "https://example.com/b", status=status)
+    )
+    await asyncio.sleep(0.15)
+
+    # The second video was downloaded while the first track is still playing.
+    assert len(ytdlp.downloads) == 2
+    # ... but the two downloads never overlapped: one per pipeline slot.
+    assert ytdlp.max_active == 1
+
+    player.release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+    assert [Path(p).name for p in player.played] == ["converted.wav", "converted.wav"]
+
+
+@pytest.mark.asyncio
+async def test_cancel_while_playing_leaves_the_queued_request_alone(monkeypatch):
+    """!cancel stops the playing track; a queued one keeps its place."""
+    import ttsbot.bot as bot_mod
+
+    async def _fake_voice_channel(ctx, bot):
+        return SimpleNamespace(id=2)
+
+    monkeypatch.setattr(bot_mod, "ensure_voice_channel", _fake_voice_channel)
+
+    pipeline = Pipeline(tts=None, rvc=None)
+    player = FakePlayer()
+    ytdlp = FakeYtdlp()
+    bot = make_rvc_bot(pipeline, player, ytdlp)
+    guild = SimpleNamespace(id=1)
+    status = FakeStatus()
+
+    first = asyncio.create_task(
+        bot._process_rvc(None, None, guild, ["snake"], "https://example.com/a", status=status)
+    )
+    await asyncio.wait_for(player.started.wait(), timeout=5)
+
+    second = asyncio.create_task(
+        bot._process_rvc(None, None, guild, ["snake"], "https://example.com/b", status=status)
+    )
+    await asyncio.sleep(0.01)
+
+    # The playing track is the cancel target, not the queued one.
+    assert pipeline.request_cancel(guild.id, 2) is True
+
+    player.release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+    # The queued request was not cancelled: it prepared and played as well.
+    assert ytdlp.downloads == ["https://example.com/a", "https://example.com/b"]
+    assert len(player.played) == 2
+    assert any("Skipped" in s for s in status.contents)
