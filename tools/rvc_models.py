@@ -383,15 +383,19 @@ def add_voice_to_config(
     insert_voice_block(config_path, name, block)
 
 
+def selected_voice_name(row: ModelRow, name: str | None = None) -> str:
+    """The config key / directory a Discord selection gets: a valid slug."""
+    slug = slugify(name or row.title)[:40]
+    return slug if VOICE_KEY_RE.fullmatch(slug) else f"voice_{slug}"
+
+
 def add_selected_model(row: ModelRow, config_path: Path, name: str | None = None) -> tuple[str, bool]:
     """Install a Discord search selection without overwriting existing voices.
 
     `name` is the user-chosen voice name; it is slugified so it always lands in
     a directory and config key the rest of the tooling accepts.
     """
-    name = slugify(name or row.title)[:40]
-    if not VOICE_KEY_RE.fullmatch(name):
-        name = f"voice_{name}"
+    name = selected_voice_name(row, name)
     cfg = Config.load(config_path)
     voice_dir = DEFAULT_MODEL_DIR / name
     if name in cfg.voices or voice_dir.exists():

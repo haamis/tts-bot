@@ -132,6 +132,11 @@ class VoiceModelView(discord.ui.View):
             return
         self.stop()
         await interaction.response.defer()  # ack the modal; the status message carries the result
+        display = rvc_models.selected_voice_name(row, name)
+        await self._progress(
+            interaction,
+            f"⏳ Adding **{display}**: downloading, installing and syncing to the GPU machines…",
+        )
         async with self.bot.voice_model_lock:
             added = None
             try:
@@ -153,13 +158,24 @@ class VoiceModelView(discord.ui.View):
                     log.exception("Could not reload voice config")
                     text += " ⚠️ Config reload failed; check the config before restarting the bot."
             if added is not None:
+                await self._progress(
+                    interaction,
+                    f"⏳ Profiling **{added}**'s pitch for multi-voice `!rvc`…",
+                )
                 text += await profile_pitch(self.bot, added)
             # Syncs can outlive the interaction token's 15-minute lifetime.
             await self._finish(interaction, text)
 
-    async def _finish(self, interaction: discord.Interaction, text: str):
+    async def _progress(self, interaction: discord.Interaction, content: str):
+        """Replace the status message mid-operation; a deleted message is not fatal."""
         edit = self.message.edit if self.message is not None else interaction.edit_original_response
-        await edit(content=text[:2000], view=None, allowed_mentions=discord.AllowedMentions.none())
+        try:
+            await edit(content=content, view=None, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            log.debug("Could not update the voice-change status message", exc_info=True)
+
+    async def _finish(self, interaction: discord.Interaction, text: str):
+        await self._progress(interaction, text[:2000])
 
 
 async def handle_voice_command(bot, message: discord.Message, command: str):

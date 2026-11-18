@@ -118,6 +118,11 @@ async def test_select_asks_for_a_name_then_installs_once(monkeypatch, synced):
     assert "Pitch profile: 150 Hz" in text
     profile.assert_awaited_once_with(b, "my_vegeta")
     assert ("Not synced" in text) is (not synced)
+    # The dropdown is replaced by progress text as soon as the name is submitted.
+    progress = [c.kwargs["content"] for c in submit.edit_original_response.call_args_list]
+    assert "Adding **my_vegeta**" in progress[0]
+    assert "Profiling **my_vegeta**" in progress[1]
+    assert progress[-1] == text
     # A second submit (stale modal) must not install again.
     await modal.on_submit(interaction())
     assert calls == [(row, "My Vegeta!")]
@@ -245,3 +250,21 @@ async def test_prefix_dispatch(monkeypatch, command):
     msg = message(f"!{command} snake")
     await TTSBot.on_message(b, msg)
     handler.assert_awaited_once_with(b, msg, command)
+
+
+async def test_deleted_status_message_does_not_stop_the_install(monkeypatch):
+    b = bot()
+    row = vc.rvc_models.ModelRow("1", "Vegeta", "", "")
+    monkeypatch.setattr(vc.rvc_models, "add_selected_model", lambda r, p, n: ("vegeta", True))
+    monkeypatch.setattr(vc.Config, "load", lambda p: SimpleNamespace(voices={"vegeta": object()}))
+    monkeypatch.setattr(vc, "profile_pitch", AsyncMock(return_value=""))
+    gone = discord.HTTPException(SimpleNamespace(status=404, reason="Not Found"), "Unknown Message")
+    view = vc.VoiceModelView(b, 1, rows=[row])
+    view.message = SimpleNamespace(edit=AsyncMock(side_effect=gone))
+    view.children[0]._values = ["0"]
+    modal = vc.VoiceNameModal(view, row)
+    submit = interaction()
+    submit.edit_original_response = AsyncMock(side_effect=gone)
+    await modal.on_submit(submit)  # must not raise
+    assert not b.voice_model_lock.locked()
+    assert b.config.max_chars == 123
