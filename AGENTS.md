@@ -12,7 +12,11 @@ Python 3.12.
 - **boksi** (this host, `192.168.1.90`): CPU-only bot host, 4C/8T 16GB AMD
   2400GE thin client. Runs the `tts-bot` container; no GPU.
 - **ifrit** (`192.168.1.162`): the GPU server, **RTX 2060 6GB**, from
-  `~/rvc-gpu-server` (container `rvc-server`); WoL-capable.
+  `~/rvc-gpu-server` (container `rvc-server`); WoL-capable but only because
+  NetworkManager arms magic-packet WoL (`wake-on-lan: magic` on every wired
+  profile): the ethtool flag is volatile, resets to `d` on boot, and a cloned
+  or reimaged disk loses the arming silently — that is how waking broke in
+  2026-11. Auto-suspend on idle is deliberate (electricity), not a fault.
 - **Windows desktop** (`192.168.1.161`): **RTX 4080**, optional *preferred*
   worker via Docker Desktop / WSL2; never woken. `RVC_CUDA_MEMORY_FRACTION=0.375`
   caps the container's torch CUDA use at 6GB of the 16GB card, matching ifrit's
