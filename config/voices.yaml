@@ -167,3 +167,23 @@ voices:
           f0_method: pm,
           speaker_id: 0}
     # Added by tools/rvc_models.py — https://voice-models.com/model/1q6fGCwvpXY
+  chalmers:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: "/home/haama/TTS-bot/rvc_models/chalmers/SHChalmers.pth",
+          index: "/home/haama/TTS-bot/rvc_models/chalmers/added_IVF58_Flat_nprobe_1_SHChalmers_v2.index",
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/1m5tibRd8zh
+  skinner:
+    piper: {voice: en_US-lessac-medium, speed: 0.7}
+    cloud: {speed: 1.0}
+    rvc: {model: "/home/haama/TTS-bot/rvc_models/skinner/Skinner_Seymour.pth",
+          index: "/home/haama/TTS-bot/rvc_models/skinner/added_IVF112_Flat_nprobe_1_Skinner_Seymour_v2.index",
+          pitch: 0,
+          index_rate: 0.75,
+          f0_method: pm,
+          speaker_id: 0}
+    # Added by tools/rvc_models.py — https://voice-models.com/model/1sPswRtaL4Q
