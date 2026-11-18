@@ -18,7 +18,14 @@ Python 3.12.
   (warm reboots and suspend keep it), so a one-time arming can hold for months
   and then die silently at the next cold power-off, which is how waking broke
   in 2026-11 (the drive clone's power-down, not the `dd` copy itself).
-  Auto-suspend on idle is deliberate (electricity), not a fault.
+  Auto-suspend on idle is deliberate (electricity), not a fault. Its
+  `~/rvc-gpu-server` checkout is a separate, older line with local edits and a
+  compose carrying ifrit-specific mounts (`~/rvc-gpu-server/rvc_infer`,
+  `~/ttsbot-diarize` at $HOME) — never fast-forward it onto main blindly or the
+  mounts break. Its baked image predates the torch-cap work and stays uncapped
+  by policy. Host model caches must stay owned by uid 1000: root-owned
+  `~/.cache/huggingface` / `~/.cache/torch` (2026-11-17) made every engine fail
+  with 503 "Permission denied" until `sudo chown -R 1000:1000` on both.
 - **Windows desktop** (`192.168.1.161`): **RTX 4080**, optional *preferred*
   worker via Docker Desktop / WSL2; never woken. `RVC_CUDA_MEMORY_FRACTION=0.375`
   caps the container's torch CUDA use at 6GB of the 16GB card, matching ifrit's
@@ -71,6 +78,8 @@ checkpoint silently sends separation to ifrit via the normal 503 fallback.
 GPU pyannote must use `ttsbot_diarize.diarize_pyannote` (shared v3/v4 support),
 not the GPU repo's legacy `ttsbot.media.diarize_pyannote` copy: pyannote 4
 rejects the latter's `use_auth_token`, causing 503 and fallback to ifrit.
+(ifrit's own older checkout still imports the legacy copy and works with
+community-1 — verified 2026-11-18; the requirement applies to the 4080.)
 
 **Deployment boundary:** this host is **boksi**, the CPU-only bot host. The live
 bot is Docker container `tts-bot` (`docker-compose.yml`), NOT a host venv process.
