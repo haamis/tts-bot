@@ -18,14 +18,21 @@ Python 3.12.
   (warm reboots and suspend keep it), so a one-time arming can hold for months
   and then die silently at the next cold power-off, which is how waking broke
   in 2026-11 (the drive clone's power-down, not the `dd` copy itself).
-  Auto-suspend on idle is deliberate (electricity), not a fault. Its
-  `~/rvc-gpu-server` checkout is a separate, older line with local edits and a
-  compose carrying ifrit-specific mounts (`~/rvc-gpu-server/rvc_infer`,
-  `~/ttsbot-diarize` at $HOME) — never fast-forward it onto main blindly or the
-  mounts break. Its baked image predates the torch-cap work and stays uncapped
-  by policy. Host model caches must stay owned by uid 1000: root-owned
-  `~/.cache/huggingface` / `~/.cache/torch` (2026-11-17) made every engine fail
-  with 503 "Permission denied" until `sudo chown -R 1000:1000` on both.
+  Auto-suspend on idle is deliberate (electricity), not a fault. ifrit sits on
+  the canonical line; run its compose as
+  `docker compose -f compose.yaml -f compose.ifrit.yaml -f compose.gpu.yaml` —
+  the overlay restores its mount paths (RVC/diarize code lives in
+  `~/rvc-gpu-server/rvc_infer` and `~/ttsbot-diarize`, not in a `~/TTS-bot`
+  copy), and forgetting it loses both mounts. Uncapped by policy:
+  `RVC_CUDA_MEMORY_FRACTION` unset, and its startup log says "uncapped". The
+  model sync maps renamed voices to their original ifrit dirs (armstrong ->
+  `senatorarmstrong_20_400_20epochs`), so a remote 400 "model file not found"
+  after a rename means: run `tools/rvc_models.py sync` from the bot container.
+  Host model caches must stay owned by uid 1000 (`~/.cache/huggingface`,
+  `~/.cache/torch`): an agent session left them root-owned (2026-11-17), which
+  made every engine fail with 503 "Permission denied" until `sudo chown -R
+  1000:1000` on both — agents must not create root-owned files in
+  container-visible paths.
 - **Windows desktop** (`192.168.1.161`): **RTX 4080**, optional *preferred*
   worker via Docker Desktop / WSL2; never woken. `RVC_CUDA_MEMORY_FRACTION=0.375`
   caps the container's torch CUDA use at 6GB of the 16GB card, matching ifrit's
