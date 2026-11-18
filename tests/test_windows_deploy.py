@@ -16,6 +16,12 @@ def test_model_sync_public_keys_survive_without_wsl_bind_mounts():
     }
 
 
+def test_windows_worker_caps_torch_memory():
+    path = Path(__file__).resolve().parents[1] / "deploy/windows/compose.yaml"
+    env = yaml.safe_load(path.read_text())["services"]["rvc-server"]["environment"]
+    assert "RVC_CUDA_MEMORY_FRACTION" in env
+
+
 def test_gpu_and_sync_share_persistent_voice_models():
     path = Path(__file__).resolve().parents[1] / "deploy/windows/compose.yaml"
     config = yaml.safe_load(path.read_text())

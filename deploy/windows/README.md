@@ -87,7 +87,8 @@ per process, so that budget is split between the two: the server (engines,
 diarization) takes `RVC_CUDA_SERVER_SHARE` and the RVC worker the rest, evenly
 by default (3GB each). Measured on this card: RVC conversion ~2.0GB total,
 diarization with both engines loaded ~2.7GB. Raise the fraction and
-`RVC_SERVER_CHUNK_SEC` together if you ever want the full card.
+`RVC_SERVER_CHUNK_SEC` together if you ever want the full card. ifrit itself
+runs uncapped — its 6GB 2060 is already the limit.
 
 In Administrator PowerShell, allow boksi through Windows Firewall:
 
