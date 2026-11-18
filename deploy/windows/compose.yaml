@@ -9,7 +9,7 @@ services:
       ONNX_PROVIDER: CUDAExecutionProvider
       # The container's torch budget: 6GB of the 16GB card (37.5%), matching
       # ifrit's RTX 2060 so chunk sizes and memory margins behave the same.
-      # Split between the server (RVC_CUDA_SERVER_SHARE, default 1/3) and the
+      # Split between the server (RVC_CUDA_SERVER_SHARE, default 1/2) and the
       # RVC worker, so the two caps add up to this fraction.
       RVC_CUDA_MEMORY_FRACTION: "0.375"
     volumes:

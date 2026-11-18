@@ -8,8 +8,9 @@ Docker Desktop must be running (enable its start-at-login setting).
 
 Keep runtime files in WSL's Linux filesystem, not `/mnt/c`:
 
-- `~/TTS-bot/`: this checkout, including `rvc-gpu-server`, `rvc_infer`, and
-  `ttsbot-diarize`.
+- `~/TTS-bot/`: a copy of this checkout (the Windows side has no `.git`;
+  update it by copying changed files), including `rvc-gpu-server`, `rvc_infer`,
+  and `ttsbot-diarize`.
 - `~/rvc-gpu-server/models`: Kokoro's ONNX model and voice bank.
 - `~/.cache/huggingface` and `~/.cache/torch`: writable model caches.
 - `~/.config/rvc-server/env`: mode 600; `RVC_GPU_SERVER_TOKEN` and optional
@@ -82,12 +83,11 @@ Keep these LAN-only; do not forward them from the internet.
 The container's torch budget is **6GB of the card's 16GB**
 (`RVC_CUDA_MEMORY_FRACTION: "0.375"` in `compose.yaml`), so it behaves like
 ifrit's 6GB RTX 2060 and the shared 20s chunk default holds. Torch caps itself
-per process, so that budget is split: the server gets
-`RVC_CUDA_SERVER_SHARE` (default 1/3 = 2GB) and the RVC worker the remaining
-2/3 (4GB). Raise the fraction and `RVC_SERVER_CHUNK_SEC` together if you ever
-want the full card; raise the share if a server-side engine (Chatterbox,
-pyannote, separation) needs more than 2GB — the worker measured ~2GB total in
-practice.
+per process, so that budget is split between the two: the server (engines,
+diarization) takes `RVC_CUDA_SERVER_SHARE` and the RVC worker the rest, evenly
+by default (3GB each). Measured on this card: RVC conversion ~2.0GB total,
+diarization with both engines loaded ~2.7GB. Raise the fraction and
+`RVC_SERVER_CHUNK_SEC` together if you ever want the full card.
 
 In Administrator PowerShell, allow boksi through Windows Firewall:
 
